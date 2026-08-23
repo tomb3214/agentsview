@@ -1032,8 +1032,13 @@ func TestCurrentDataVersionGrokMessageTimestamps(t *testing.T) {
 }
 
 func TestCurrentDataVersionPositAssistantCacheAccounting(t *testing.T) {
-	assert.Equal(t, 91, CurrentDataVersion(),
+	assert.GreaterOrEqual(t, CurrentDataVersion(), 91,
 		"Posit Assistant cache accounting requires a sequential backfill")
+}
+
+func TestCurrentDataVersionAntigravityCLICwd(t *testing.T) {
+	assert.Equal(t, 92, CurrentDataVersion(),
+		"Antigravity CLI CWD recovery requires a sequential backfill")
 }
 
 func TestInsertMessages_PreservesToolResultEvents(t *testing.T) {
