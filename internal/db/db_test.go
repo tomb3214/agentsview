@@ -1009,9 +1009,14 @@ func TestMigration_ToolResultEventsTable(t *testing.T) {
 }
 
 func TestCurrentDataVersionClaudeIDEEnvelopeSplit(t *testing.T) {
-	assert.Equal(t, 88, CurrentDataVersion(),
+	assert.GreaterOrEqual(t, CurrentDataVersion(), 88,
 		"version 88 splits Claude IDE envelopes off mixed prompts after "+
 			"the Codex fork replay boundary reparse")
+}
+
+func TestCurrentDataVersionAntigravityCLICwd(t *testing.T) {
+	assert.Equal(t, 89, CurrentDataVersion(),
+		"Antigravity CLI CWD recovery requires a sequential backfill")
 }
 
 func TestInsertMessages_PreservesToolResultEvents(t *testing.T) {

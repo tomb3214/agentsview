@@ -79,7 +79,7 @@ type AntigravityCLIParseStatus struct {
 // package-level ParseAntigravityCLISessionWithStatus entrypoint was folded onto
 // the provider.
 func (p *antigravityCLIProvider) parseSessionWithStatus(
-	path, project, machine string,
+	path, project, cwd, machine string,
 ) (*ParsedSession, []ParsedMessage, []ParsedUsageEvent, AntigravityCLIParseStatus, error) {
 	var status AntigravityCLIParseStatus
 	info, err := os.Stat(path)
@@ -237,15 +237,18 @@ func (p *antigravityCLIProvider) parseSessionWithStatus(
 		messages[i].Ordinal = i
 	}
 
-	if project == "" {
-		project = inferAntigravityProject(
-			filepath.Join(root, "history.jsonl"), id,
-		)
-		if project == "" {
-			project = inferAntigravityProjectFromHistoryFallback(
-				filepath.Join(root, "history.jsonl"), messages, info.ModTime(),
+	historyPath := filepath.Join(root, "history.jsonl")
+	if cwd == "" {
+		cwd = inferAntigravityProject(historyPath, id)
+		if cwd == "" {
+			cwd = inferAntigravityProjectFromHistoryFallback(
+				historyPath, messages, info.ModTime(),
 			)
 		}
+		cwd = normalizeAntigravityCLIWorkspace(cwd)
+	}
+	if project == "" {
+		project = cwd
 	}
 
 	var firstMessage string
@@ -291,6 +294,7 @@ func (p *antigravityCLIProvider) parseSessionWithStatus(
 	sess := &ParsedSession{
 		ID:                 antigravityCLIIDPrefix + storageID,
 		Project:            project,
+		Cwd:                cwd,
 		Machine:            machine,
 		Agent:              AgentAntigravityCLI,
 		FirstMessage:       firstMessage,
@@ -326,6 +330,14 @@ func (p *antigravityCLIProvider) parseSessionWithStatus(
 		return sess, nil, usageEvents, status, nil
 	}
 	return sess, messages, usageEvents, status, nil
+}
+
+func normalizeAntigravityCLIWorkspace(workspace string) string {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" || !filepath.IsAbs(workspace) {
+		return ""
+	}
+	return filepath.Clean(workspace)
 }
 
 func loadAntigravityCLIDBSteps(

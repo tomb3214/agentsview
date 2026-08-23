@@ -104,6 +104,7 @@ func (p *antigravityCLIProvider) Parse(
 	sess, msgs, usageEvents, status, err := p.parseSessionWithStatus(
 		src.Path,
 		req.Source.ProjectHint,
+		src.Workspace,
 		machine,
 	)
 	if err != nil {
@@ -139,10 +140,11 @@ func (p *antigravityCLIProvider) Parse(
 }
 
 type antigravityCLISource struct {
-	Root    string
-	Path    string
-	ID      string
-	Project string
+	Root      string
+	Path      string
+	ID        string
+	Project   string
+	Workspace string
 }
 
 type antigravityCLISourceSet struct {
@@ -212,7 +214,7 @@ func (s antigravityCLISourceSet) DiscoverEach(ctx context.Context, yield func(So
 				if err != nil {
 					return err
 				}
-				return yield(s.newSourceRef(root, path, rawID, project))
+				return yield(s.newSourceRef(root, path, rawID, project, project))
 			})
 			if err != nil {
 				return errors.Join(err, projects.close())
@@ -562,10 +564,11 @@ func (s antigravityCLISourceSet) sourceRef(
 	if !allowMissing && !IsRegularFile(path) {
 		return SourceRef{}, false
 	}
+	workspace := s.projectForID(root, strings.TrimPrefix(id, antigravityImplicitTag))
 	if project == "" {
-		project = s.projectForID(root, strings.TrimPrefix(id, antigravityImplicitTag))
+		project = workspace
 	}
-	return s.newSourceRef(root, path, id, project), true
+	return s.newSourceRef(root, path, id, project, workspace), true
 }
 
 // sourceRefWithProjects is sourceRef but resolves a missing project from a
@@ -585,14 +588,15 @@ func (s antigravityCLISourceSet) sourceRefWithProjects(
 	if !allowMissing && !IsRegularFile(path) {
 		return SourceRef{}, false
 	}
+	workspace := projects[strings.TrimPrefix(id, antigravityImplicitTag)]
 	if project == "" {
-		project = projects[strings.TrimPrefix(id, antigravityImplicitTag)]
+		project = workspace
 	}
-	return s.newSourceRef(root, path, id, project), true
+	return s.newSourceRef(root, path, id, project, workspace), true
 }
 
 func (s antigravityCLISourceSet) newSourceRef(
-	root, path, id, project string,
+	root, path, id, project, workspace string,
 ) SourceRef {
 	return SourceRef{
 		Provider:       AgentAntigravityCLI,
@@ -601,10 +605,11 @@ func (s antigravityCLISourceSet) newSourceRef(
 		FingerprintKey: path,
 		ProjectHint:    project,
 		Opaque: antigravityCLISource{
-			Root:    root,
-			Path:    path,
-			ID:      id,
-			Project: project,
+			Root:      root,
+			Path:      path,
+			ID:        id,
+			Project:   project,
+			Workspace: normalizeAntigravityCLIWorkspace(workspace),
 		},
 	}
 }
@@ -721,6 +726,7 @@ func antigravityCLIProviderCapabilities() Capabilities {
 		Source: source,
 		Content: ContentCapabilities{
 			FirstMessage:         CapabilitySupported,
+			Cwd:                  CapabilitySupported,
 			Thinking:             CapabilitySupported,
 			ToolCalls:            CapabilitySupported,
 			ToolResults:          CapabilitySupported,

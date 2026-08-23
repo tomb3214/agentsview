@@ -1498,7 +1498,11 @@ Grok section and remove the explicit registry exception in the coverage test.
   provider USD cost is consumed.
 - **Agentsview:** `internal/parser/antigravity_cli.go`,
   `internal/parser/antigravity_crypto.go`, and
-  `internal/parser/antigravity_cli_provider.go`.
+  `internal/parser/antigravity_cli_provider.go`. The CLI `history.jsonl`
+  `workspace` value is also the authoritative session CWD when it is an
+  absolute path. Agentsview resolves it by exact conversation ID, with the
+  existing strict prompt/time fallback for older untagged rows, and leaves CWD
+  empty when the value is missing, relative, or ambiguous.
 
 ## iFlow CLI (`iflow`)
 
