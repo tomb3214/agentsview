@@ -297,8 +297,9 @@ func TestAntigravityCLIProviderUsesLastConversationsWorkspace(t *testing.T) {
 	require.Len(t, discovered, 2)
 	conversation := discovered[0]
 	assert.Equal(t, "/tmp/cache-proj", conversation.ProjectHint)
-	assert.Equal(t, SourceCwdResolved, conversation.CwdResolution.State)
-	assert.Equal(t, "/tmp/cache-proj", conversation.CwdResolution.Path)
+	source, ok := conversation.Opaque.(antigravityCLISource)
+	require.True(t, ok)
+	assert.Equal(t, "/tmp/cache-proj", source.Workspace)
 	before, err := provider.Fingerprint(context.Background(), conversation)
 	require.NoError(t, err)
 
@@ -309,7 +310,9 @@ func TestAntigravityCLIProviderUsesLastConversationsWorkspace(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, changed, 2)
 	conversation = changed[0]
-	assert.Equal(t, "/tmp/cache-proj-2", conversation.CwdResolution.Path)
+	source, ok = conversation.Opaque.(antigravityCLISource)
+	require.True(t, ok)
+	assert.Equal(t, "/tmp/cache-proj-2", source.Workspace)
 	after, err := provider.Fingerprint(context.Background(), conversation)
 	require.NoError(t, err)
 	assert.NotEqual(t, before.Hash, after.Hash)
