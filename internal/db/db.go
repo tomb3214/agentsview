@@ -433,7 +433,9 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // (93: Current Antigravity CLI sessions recover CWD from the exact
 // cache/last_conversations.json workspace mapping, while retaining history
 // compatibility.)
-const dataVersion = 93
+// (94: Antigravity CLI keeps the exact approved workspace as CWD while
+// normalizing the project label for project-filtered PostgreSQL mirrors.)
+const dataVersion = 94
 
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 

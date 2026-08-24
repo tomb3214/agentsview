@@ -251,6 +251,14 @@ func (p *antigravityCLIProvider) parseSessionWithStatus(
 	if project == "" {
 		project = cwd
 	}
+	// Antigravity's workspace map contains an absolute working directory,
+	// not a project label. Keep that exact path as Cwd, but publish the same
+	// normalized project name used by the other cwd-aware providers. Without
+	// this split, project-filtered PostgreSQL pushes reject otherwise approved
+	// Antigravity sessions because their project is an absolute path.
+	if cwd != "" && normalizeAntigravityCLIWorkspace(project) == cwd {
+		project = ExtractProjectFromCwd(cwd)
+	}
 
 	var firstMessage string
 	var userCount int
