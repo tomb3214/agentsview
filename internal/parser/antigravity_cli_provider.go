@@ -613,7 +613,7 @@ func (s antigravityCLISourceSet) newSourceRef(
 			Path:      path,
 			ID:        id,
 			Project:   project,
-			Workspace: workspace,
+			Workspace: normalizeAntigravityCLIWorkspace(workspace),
 		},
 	}
 }
