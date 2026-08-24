@@ -435,7 +435,9 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // compatibility.)
 // (94: Antigravity CLI keeps the exact approved workspace as CWD while
 // normalizing the project label for project-filtered PostgreSQL mirrors.)
-const dataVersion = 94
+// (95: live linked-worktree Git identity takes precedence over lexical
+// manager layouts, including custom-named Codex worktree roots.)
+const dataVersion = 95
 
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 

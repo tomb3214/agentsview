@@ -1037,8 +1037,13 @@ func TestCurrentDataVersionPositAssistantCacheAccounting(t *testing.T) {
 }
 
 func TestCurrentDataVersionAntigravityCLICwd(t *testing.T) {
-	assert.Equal(t, 94, CurrentDataVersion(),
+	assert.GreaterOrEqual(t, CurrentDataVersion(), 94,
 		"Antigravity CLI project normalization requires a sequential backfill")
+}
+
+func TestCurrentDataVersionAntigravityCLIWorktreeProject(t *testing.T) {
+	assert.Equal(t, 95, CurrentDataVersion(),
+		"Antigravity CLI linked-worktree project recovery requires a sequential backfill")
 }
 
 func TestInsertMessages_PreservesToolResultEvents(t *testing.T) {
