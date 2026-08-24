@@ -1037,8 +1037,8 @@ func TestCurrentDataVersionPositAssistantCacheAccounting(t *testing.T) {
 }
 
 func TestCurrentDataVersionAntigravityCLICwd(t *testing.T) {
-	assert.Equal(t, 92, CurrentDataVersion(),
-		"Antigravity CLI CWD recovery requires a sequential backfill")
+	assert.Equal(t, 93, CurrentDataVersion(),
+		"Antigravity CLI cache-backed CWD recovery requires a sequential backfill")
 }
 
 func TestInsertMessages_PreservesToolResultEvents(t *testing.T) {

@@ -1219,6 +1219,18 @@ func TestBuildAntigravityProjectMapRobust(t *testing.T) {
 	assert.False(t, ok, "id-2 had no workspace, should be absent")
 }
 
+func TestAntigravityProjectMapFromLastConversations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "last_conversations.json")
+	assert.Empty(t, antigravityProjectMapFromLastConversations(path))
+	mustWrite(t, path, []byte(
+		`{"/tmp/a":"id-1","relative/project":"id-2","/tmp/empty":""}`,
+	))
+	m := antigravityProjectMapFromLastConversations(path)
+	require.Len(t, m, 2)
+	assert.Equal(t, "/tmp/a", m["id-1"])
+	assert.Equal(t, "relative/project", m["id-2"])
+}
+
 // ---- helpers --------------------------------------------------
 
 func mustMkdir(t *testing.T, p string) {

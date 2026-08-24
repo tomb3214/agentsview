@@ -430,7 +430,10 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // uncached prompt remainder is priced as input rather than cache creation.)
 // (92: Antigravity CLI sessions recover CWD from the history workspace so
 // existing rows must be re-parsed to receive the normalized field.)
-const dataVersion = 92
+// (93: Current Antigravity CLI sessions recover CWD from the exact
+// cache/last_conversations.json workspace mapping, while retaining history
+// compatibility.)
+const dataVersion = 93
 
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 
