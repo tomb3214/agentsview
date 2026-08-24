@@ -1014,9 +1014,9 @@ func TestCurrentDataVersionClaudeIDEEnvelopeSplit(t *testing.T) {
 			"the Codex fork replay boundary reparse")
 }
 
-func TestCurrentDataVersionAntigravityCLICwd(t *testing.T) {
-	assert.Equal(t, 91, CurrentDataVersion(),
-		"Antigravity CLI project normalization requires a sequential backfill")
+func TestCurrentDataVersionAntigravityCLIWorktreeProject(t *testing.T) {
+	assert.Equal(t, 92, CurrentDataVersion(),
+		"Antigravity CLI linked-worktree project recovery requires a sequential backfill")
 }
 
 func TestInsertMessages_PreservesToolResultEvents(t *testing.T) {
