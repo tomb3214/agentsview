@@ -300,6 +300,13 @@ func TestAntigravityCLIProviderUsesLastConversationsWorkspace(t *testing.T) {
 	source, ok := conversation.Opaque.(antigravityCLISource)
 	require.True(t, ok)
 	assert.Equal(t, "/tmp/cache-proj", source.Workspace)
+	parsed, err := provider.Parse(context.Background(), ParseRequest{
+		Source: conversation, Machine: "devbox",
+	})
+	require.NoError(t, err)
+	require.Len(t, parsed.Results, 1)
+	assert.Equal(t, "cache_proj", parsed.Results[0].Result.Session.Project)
+	assert.Equal(t, "/tmp/cache-proj", parsed.Results[0].Result.Session.Cwd)
 	before, err := provider.Fingerprint(context.Background(), conversation)
 	require.NoError(t, err)
 

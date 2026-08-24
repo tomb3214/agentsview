@@ -1015,8 +1015,8 @@ func TestCurrentDataVersionClaudeIDEEnvelopeSplit(t *testing.T) {
 }
 
 func TestCurrentDataVersionAntigravityCLICwd(t *testing.T) {
-	assert.Equal(t, 90, CurrentDataVersion(),
-		"Antigravity CLI cache-backed CWD recovery requires a sequential backfill")
+	assert.Equal(t, 91, CurrentDataVersion(),
+		"Antigravity CLI project normalization requires a sequential backfill")
 }
 
 func TestInsertMessages_PreservesToolResultEvents(t *testing.T) {

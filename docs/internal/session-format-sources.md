@@ -1504,7 +1504,9 @@ Grok section and remove the explicit registry exception in the coverage test.
   authoritative session CWD sources when the workspace is an absolute path.
   Agentsview prefers the current cache for an exact conversation ID, retains
   the strict prompt/time fallback for older untagged history rows, and leaves
-  CWD empty when the value is missing, relative, or ambiguous.
+  CWD empty when the value is missing, relative, or ambiguous. The exact
+  absolute workspace remains the CWD; the project label is normalized from
+  that CWD so project-filtered PostgreSQL mirrors admit the same session.
 
 ## iFlow CLI (`iflow`)
 

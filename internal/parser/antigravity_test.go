@@ -417,7 +417,7 @@ func TestAntigravityCLIDiscoverAndParseDB(t *testing.T) {
 	assert.Equal(t, "antigravity-cli:"+id, sess.ID)
 	assert.Equal(t, AgentAntigravityCLI, sess.Agent)
 	assert.Equal(t, dbPath, sess.File.Path)
-	assert.Equal(t, "/tmp/db-proj", sess.Project)
+	assert.Equal(t, "db_proj", sess.Project)
 	assert.Equal(t, "/tmp/db-proj", sess.Cwd)
 	require.Len(t, msgs, 2)
 	assert.Equal(t, RoleUser, msgs[0].Role)
@@ -446,7 +446,7 @@ func TestAntigravityCLIProjectFallbackPromptAndProximity(t *testing.T) {
 	sess, msgs, err := parseAntigravityCLITestSession(t, dbPath, "", "m")
 	require.NoError(t, err)
 	require.Len(t, msgs, 2)
-	assert.Equal(t, "/tmp/fallback-proj", sess.Project, "should successfully fallback infer project")
+	assert.Equal(t, "fallback_proj", sess.Project, "should normalize the inferred project label")
 	assert.Equal(t, "/tmp/fallback-proj", sess.Cwd, "should successfully fallback infer cwd")
 }
 
