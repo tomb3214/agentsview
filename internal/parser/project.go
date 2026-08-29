@@ -250,13 +250,6 @@ func extractProjectFromCwdWithBranch(
 	}
 	cleaned := filepath.Clean(norm)
 
-	// Recognize tool-anchored worktree manager layouts before walking git
-	// roots. These layouts encode the owning project in the path even when
-	// the git root basename is a branch or generated worktree id.
-	if p := projectFromAnchoredWorktreeLayout(cleaned); p != "" {
-		return NormalizeName(p)
-	}
-
 	// Skip the git-root walk when the cwd cannot resolve to a
 	// real local filesystem location. On macOS a bulk walk under
 	// an unbacked autofs prefix cascades through automountd into
@@ -271,6 +264,15 @@ func extractProjectFromCwdWithBranch(
 			}
 			return NormalizeName(name)
 		}
+	}
+
+	// Recognize tool-anchored worktree manager layouts after live Git
+	// metadata. The lexical layouts remain the durable fallback for deleted
+	// worktrees, but a live linked worktree can resolve its canonical main
+	// checkout even when a custom worktree root does not use the manager's
+	// usual $ID/$REPO nesting.
+	if p := projectFromAnchoredWorktreeLayout(cleaned); p != "" {
+		return NormalizeName(p)
 	}
 
 	// Generic hosting layouts are intentionally a fallback after live Git

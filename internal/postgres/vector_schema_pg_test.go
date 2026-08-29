@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -235,6 +236,67 @@ func TestEnsureSchemaFastPathCreatesVectorTables(t *testing.T) {
 		"the fast path must recreate the vector tables on an up-to-date schema")
 	assert.True(t, tableExistsPG(t, pg, "vector_documents"))
 	assert.True(t, tableExistsPG(t, pg, "vector_push_state"))
+}
+
+// TestRestrictedRoleReusesPreprovisionedVectorSchema pins the production
+// least-privilege path: an ingest role without CREATE can use vector tables
+// and a generation chunk table that the migration role already installed.
+func TestRestrictedRoleReusesPreprovisionedVectorSchema(t *testing.T) {
+	pgURL := testPGURL(t)
+	const schema = "agentsview_vector_preprovisioned_test"
+	const role = "agentsview_vector_preprovisioned"
+	const rolePassword = "agentsview_vector_preprovisioned_pw"
+
+	admin, err := Open(pgURL, schema, true)
+	require.NoError(t, err, "Open admin")
+	t.Cleanup(func() { _ = admin.Close() })
+
+	ctx := context.Background()
+	_, err = admin.Exec(`DROP SCHEMA IF EXISTS ` + schema + ` CASCADE`)
+	require.NoError(t, err, "drop schema")
+	require.NoError(t, EnsureSchema(ctx, admin, schema))
+	unavailable, err := ensureVectorBaseSchemaPG(ctx, admin)
+	require.NoError(t, err)
+	if unavailable != "" {
+		t.Skip(unavailable)
+	}
+	genID, err := ensureVectorGeneration(ctx, admin, "fp-preprovisioned", "m", 4)
+	require.NoError(t, err)
+	require.NoError(t, ensureVectorChunkTable(ctx, admin, genID, 4))
+
+	_, _ = admin.Exec(`DROP OWNED BY ` + role)
+	_, _ = admin.Exec(`DROP ROLE IF EXISTS ` + role)
+	_, err = admin.Exec(
+		`CREATE ROLE ` + role + ` LOGIN PASSWORD '` + rolePassword + `'`)
+	require.NoError(t, err, "create restricted role")
+	t.Cleanup(func() {
+		_, _ = admin.Exec(`DROP SCHEMA IF EXISTS ` + schema + ` CASCADE`)
+		_, _ = admin.Exec(`DROP OWNED BY ` + role)
+		_, _ = admin.Exec(`DROP ROLE IF EXISTS ` + role)
+	})
+	for _, grant := range []string{
+		`GRANT USAGE ON SCHEMA ` + schema + ` TO ` + role,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ` +
+			schema + ` TO ` + role,
+		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA ` + schema + ` TO ` + role,
+		`REVOKE CREATE ON SCHEMA ` + schema + ` FROM ` + role,
+	} {
+		_, err = admin.Exec(grant)
+		require.NoError(t, err, grant)
+	}
+
+	restrictedURL, err := url.Parse(pgURL)
+	require.NoError(t, err)
+	restrictedURL.User = url.UserPassword(role, rolePassword)
+	restricted, err := Open(restrictedURL.String(), schema, true)
+	require.NoError(t, err, "Open restricted")
+	t.Cleanup(func() { _ = restricted.Close() })
+
+	unavailable, err = ensureVectorBaseSchemaPG(ctx, restricted)
+	require.NoError(t, err, "complete base schema must not require CREATE")
+	assert.Empty(t, unavailable)
+	require.NoError(t, ensureVectorChunkTable(ctx, restricted, genID, 4),
+		"complete generation schema must not require CREATE")
 }
 
 // TestVectorHalfvecGate pins the availability gate's two observable shapes:

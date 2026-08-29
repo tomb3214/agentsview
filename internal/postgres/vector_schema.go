@@ -92,13 +92,19 @@ SELECT EXISTS (
 // privilege, or a pgvector too old for halfvec leave semantic search
 // unavailable with a one-line notice.
 func ensureVectorBaseSchemaPG(ctx context.Context, pg *sql.DB) (string, error) {
-	if _, err := pg.ExecContext(ctx,
-		`CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
-		log.Printf("pg schema: pgvector unavailable, semantic search disabled: %v", err)
-	}
 	available, err := VectorExtensionAvailable(ctx, pg)
 	if err != nil {
 		return "", err
+	}
+	if !available {
+		if _, err := pg.ExecContext(ctx,
+			`CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+			log.Printf("pg schema: pgvector unavailable, semantic search disabled: %v", err)
+		}
+		available, err = VectorExtensionAvailable(ctx, pg)
+		if err != nil {
+			return "", err
+		}
 	}
 	if !available {
 		return "pgvector extension unavailable", nil
@@ -126,10 +132,33 @@ func ensureVectorBaseSchemaPG(ctx context.Context, pg *sql.DB) (string, error) {
 		log.Printf("pg schema: %s; semantic search disabled", reason)
 		return reason, nil
 	}
+	if vectorBaseSchemaReady(ctx, pg) {
+		return "", nil
+	}
 	if _, err := pg.ExecContext(ctx, vectorBaseDDL); err != nil {
 		return "", fmt.Errorf("creating vector base schema: %w", err)
 	}
 	return "", nil
+}
+
+// vectorBaseSchemaReady reports whether a privileged migration has already
+// installed the complete fixed vector substrate. Ingest roles deliberately do
+// not hold CREATE on the target schema; avoiding idempotent DDL when every
+// relation already exists lets those roles publish vectors without weakening
+// that boundary. A partial substrate still falls through to the normal DDL so
+// only a privileged role can repair it.
+func vectorBaseSchemaReady(ctx context.Context, pg *sql.DB) bool {
+	for _, table := range []string{
+		"vector_generations",
+		"vector_generation_machines",
+		"vector_documents",
+		"vector_push_state",
+	} {
+		if !pgHasTable(ctx, pg, table) {
+			return false
+		}
+	}
+	return pgHasIndex(ctx, pg, "idx_vector_documents_session_ordinal")
 }
 
 // vectorChunkTable names generation genID's chunk table. Per-generation
@@ -175,6 +204,10 @@ func ensureVectorChunkTable(
 		return err
 	}
 	table := vectorChunkTable(genID)
+	index := fmt.Sprintf("idx_%s_hnsw", table)
+	if pgHasTable(ctx, pg, table) && pgHasIndex(ctx, pg, index) {
+		return nil
+	}
 	if _, err := pg.ExecContext(ctx, fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s (
     doc_key     TEXT NOT NULL,
@@ -185,8 +218,8 @@ CREATE TABLE IF NOT EXISTS %s (
 		return fmt.Errorf("creating %s: %w", table, err)
 	}
 	if _, err := pg.ExecContext(ctx, fmt.Sprintf(
-		`CREATE INDEX IF NOT EXISTS idx_%s_hnsw ON %s
-		 USING hnsw (embedding %s.halfvec_cosine_ops)`, table, table, extSchema)); err != nil {
+		`CREATE INDEX IF NOT EXISTS %s ON %s
+		 USING hnsw (embedding %s.halfvec_cosine_ops)`, index, table, extSchema)); err != nil {
 		return fmt.Errorf("creating %s hnsw index: %w", table, err)
 	}
 	return nil
