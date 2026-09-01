@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -592,6 +593,8 @@ func TestSyncEnsureSchemaSkipsLegacyDDLWhenSchemaCompatible(t *testing.T) {
 		"source_session_project_identity_snapshot_scopes": true,
 		"source_worktree_project_mappings":                true,
 		"source_worktree_project_mapping_scopes":          true,
+		"recall_entries":                                  true,
+		"recall_evidence":                                 true,
 		"cursor_usage_events":                             true,
 	}
 	state.existingIndexes = map[string]bool{
@@ -630,6 +633,8 @@ func TestEnsureSchemaScrubsProjectIdentityGitRemoteCredentials(t *testing.T) {
 		"source_session_project_identity_snapshot_scopes": true,
 		"source_worktree_project_mappings":                true,
 		"source_worktree_project_mapping_scopes":          true,
+		"recall_entries":                                  true,
+		"recall_evidence":                                 true,
 		"cursor_usage_events":                             true,
 	}
 	state.existingIndexes = map[string]bool{
@@ -942,6 +947,49 @@ func TestSyncEnsureSchemaRunsDDLWhenPushTableMissing(t *testing.T) {
 	assert.Contains(t, strings.ToLower(state.executedSQL()),
 		"create table",
 		"fallback must create missing push tables")
+}
+
+func TestSyncEnsureSchemaRunsDDLWhenRecallTableMissing(t *testing.T) {
+	requiredTables := map[string]bool{
+		"model_pricing":                                   true,
+		"model_pricing_bands":                             true,
+		"source_archives":                                 true,
+		"source_project_identity_observations":            true,
+		"source_project_identity_observation_scopes":      true,
+		"source_session_project_identity_snapshots":       true,
+		"source_session_project_identity_snapshot_scopes": true,
+		"source_worktree_project_mappings":                true,
+		"source_worktree_project_mapping_scopes":          true,
+		"recall_entries":                                  true,
+		"recall_evidence":                                 true,
+		"cursor_usage_events":                             true,
+	}
+	for _, missing := range []string{"recall_entries", "recall_evidence"} {
+		t.Run(missing, func(t *testing.T) {
+			pg, state := newSchemaProbeDB(t, map[string][]string{
+				"sessions": {
+					"has_total_output_tokens",
+					"has_peak_context_tokens",
+				},
+				"messages": {
+					"has_context_tokens",
+					"has_output_tokens",
+				},
+			})
+			state.existingTables = maps.Clone(requiredTables)
+			delete(state.existingTables, missing)
+			state.existingIndexes = map[string]bool{
+				"idx_cursor_usage_events_dedup": true,
+			}
+			syncer := &Sync{pg: pg, schema: "agentsview"}
+
+			require.NoError(t, syncer.EnsureSchema(context.Background()))
+
+			assert.Contains(t, strings.ToLower(state.executedSQL()),
+				"create table if not exists recall_entries",
+				"missing Recall publication tables must run schema DDL")
+		})
+	}
 }
 
 func TestSyncEnsureSchemaRunsDDLWhenMappingTableMissing(t *testing.T) {
