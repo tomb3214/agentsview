@@ -2764,6 +2764,8 @@ func pushSchemaCurrent(ctx context.Context, db *sql.DB) bool {
 		!pgHasTable(ctx, db, "source_session_project_identity_snapshot_scopes") ||
 		!pgHasTable(ctx, db, "source_worktree_project_mappings") ||
 		!pgHasTable(ctx, db, "source_worktree_project_mapping_scopes") ||
+		!pgHasTable(ctx, db, "recall_entries") ||
+		!pgHasTable(ctx, db, "recall_evidence") ||
 		!pgHasTable(ctx, db, "cursor_usage_events") {
 		return false
 	}
