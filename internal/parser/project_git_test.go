@@ -69,6 +69,29 @@ func TestExtractProjectFromCwd_Git(t *testing.T) {
 			},
 			want: "my_repo",
 		},
+		{
+			name: "CodexCustomNamedWorktreeUsesLinkedGitIdentity",
+			setup: func(t *testing.T, root string) string {
+				mainRepo := filepath.Join(root, "sample-service")
+				worktree := filepath.Join(
+					root, ".codex", "worktrees",
+					"sample-service-graph-retry-20260820",
+				)
+				worktreeGitDir := filepath.Join(
+					mainRepo, ".git", "worktrees", "graph-retry",
+				)
+
+				mustMkdirAll(t, filepath.Join(mainRepo, ".git"))
+				mustMkdirAll(t, worktreeGitDir)
+				mustMkdirAll(t, filepath.Join(worktree, "docs", "reviews", "run"))
+				mustWriteFile(t, filepath.Join(worktree, ".git"),
+					"gitdir: "+worktreeGitDir+"\n")
+				mustWriteFile(t, filepath.Join(worktreeGitDir, "commondir"), "../..\n")
+
+				return filepath.Join(worktree, "docs", "reviews", "run")
+			},
+			want: "sample_service",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

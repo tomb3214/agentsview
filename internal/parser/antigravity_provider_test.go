@@ -194,7 +194,7 @@ func TestAntigravityCLIProviderSourceMethods(t *testing.T) {
 
 	plan, err := provider.WatchPlan(context.Background())
 	require.NoError(t, err)
-	require.Len(t, plan.Roots, 4)
+	require.Len(t, plan.Roots, 5)
 	assert.Equal(t, filepath.Join(root, "brain"), plan.Roots[0].Path)
 	assert.True(t, plan.Roots[0].Recursive)
 	assert.Equal(t, filepath.Join(root, "conversations"), plan.Roots[1].Path)
@@ -202,8 +202,11 @@ func TestAntigravityCLIProviderSourceMethods(t *testing.T) {
 	assert.Equal(t, root, plan.Roots[2].Path)
 	assert.False(t, plan.Roots[2].Recursive)
 	assert.Equal(t, []string{"history.jsonl"}, plan.Roots[2].IncludeGlobs)
-	assert.Equal(t, filepath.Join(root, "implicit"), plan.Roots[3].Path)
+	assert.Equal(t, filepath.Join(root, "cache"), plan.Roots[3].Path)
 	assert.False(t, plan.Roots[3].Recursive)
+	assert.Equal(t, []string{"last_conversations.json"}, plan.Roots[3].IncludeGlobs)
+	assert.Equal(t, filepath.Join(root, "implicit"), plan.Roots[4].Path)
+	assert.False(t, plan.Roots[4].Recursive)
 
 	discovered, err := provider.Discover(context.Background())
 	require.NoError(t, err)
@@ -275,6 +278,55 @@ func TestAntigravityCLIProviderSourceMethods(t *testing.T) {
 		filepath.Join(root, "conversations", otherID+".db"),
 		implicitPath,
 	)
+}
+
+func TestAntigravityCLIProviderUsesLastConversationsWorkspace(t *testing.T) {
+	root := t.TempDir()
+	id := "44444444-5555-6666-7777-888888888888"
+	writeAntigravityCLIProviderFixture(t, root, id)
+	workspace := filepath.Join(root, "cache-proj")
+	mustMkdir(t, workspace)
+	cachePath := filepath.Join(root, "cache", "last_conversations.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(cachePath), 0o755))
+	mustWrite(t, cachePath, []byte(`{"`+workspace+`":"`+id+`"}`))
+
+	provider, ok := NewProvider(AgentAntigravityCLI, ProviderConfig{
+		Roots: []string{root}, Machine: "devbox",
+	})
+	require.True(t, ok)
+	discovered, err := provider.Discover(context.Background())
+	require.NoError(t, err)
+	require.Len(t, discovered, 2)
+	conversation := discovered[0]
+	assert.Equal(t, workspace, conversation.ProjectHint)
+	source, ok := conversation.Opaque.(antigravityCLISource)
+	require.True(t, ok)
+	assert.Equal(t, workspace, source.Workspace)
+	parsed, err := provider.Parse(context.Background(), ParseRequest{
+		Source: conversation, Machine: "devbox",
+	})
+	require.NoError(t, err)
+	require.Len(t, parsed.Results, 1)
+	assert.Equal(t, "cache_proj", parsed.Results[0].Result.Session.Project)
+	assert.Equal(t, workspace, parsed.Results[0].Result.Session.Cwd)
+	before, err := provider.Fingerprint(context.Background(), conversation)
+	require.NoError(t, err)
+
+	workspace2 := filepath.Join(root, "cache-proj-2")
+	mustMkdir(t, workspace2)
+	mustWrite(t, cachePath, []byte(`{"`+workspace2+`":"`+id+`"}`))
+	changed, err := provider.SourcesForChangedPath(
+		context.Background(), ChangedPathRequest{Path: cachePath, EventKind: "write"},
+	)
+	require.NoError(t, err)
+	require.Len(t, changed, 2)
+	conversation = changed[0]
+	source, ok = conversation.Opaque.(antigravityCLISource)
+	require.True(t, ok)
+	assert.Equal(t, workspace2, source.Workspace)
+	after, err := provider.Fingerprint(context.Background(), conversation)
+	require.NoError(t, err)
+	assert.NotEqual(t, before.Hash, after.Hash)
 }
 
 func TestAntigravityCLIProviderHistoryRemovalInvalidatesAllSources(t *testing.T) {

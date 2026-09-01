@@ -80,7 +80,7 @@ type AntigravityCLIParseStatus struct {
 // package-level ParseAntigravityCLISessionWithStatus entrypoint was folded onto
 // the provider.
 func (p *antigravityCLIProvider) parseSessionWithStatus(
-	path, project, machine string,
+	path, project, cwd, machine string,
 ) (*ParsedSession, []ParsedMessage, []ParsedUsageEvent, AntigravityCLIParseStatus, error) {
 	var status AntigravityCLIParseStatus
 	info, err := os.Stat(path)
@@ -238,15 +238,26 @@ func (p *antigravityCLIProvider) parseSessionWithStatus(
 		messages[i].Ordinal = i
 	}
 
-	if project == "" {
-		project = inferAntigravityProject(
-			filepath.Join(root, "history.jsonl"), id,
-		)
-		if project == "" {
-			project = inferAntigravityProjectFromHistoryFallback(
-				filepath.Join(root, "history.jsonl"), messages, info.ModTime(),
+	historyPath := filepath.Join(root, "history.jsonl")
+	if cwd == "" {
+		cwd = buildAntigravityCLIProjectMap(root)[id]
+		if cwd == "" {
+			cwd = inferAntigravityProjectFromHistoryFallback(
+				historyPath, messages, info.ModTime(),
 			)
 		}
+		cwd = normalizeAntigravityCLIWorkspace(cwd)
+	}
+	if project == "" {
+		project = cwd
+	}
+	// Antigravity's workspace map contains an absolute working directory,
+	// not a project label. Keep that exact path as Cwd, but publish the same
+	// normalized project name used by the other cwd-aware providers. Without
+	// this split, project-filtered PostgreSQL pushes reject otherwise approved
+	// Antigravity sessions because their project is an absolute path.
+	if cwd != "" && normalizeAntigravityCLIWorkspace(project) == cwd {
+		project = ExtractProjectFromCwd(cwd)
 	}
 
 	var firstMessage string
@@ -292,6 +303,7 @@ func (p *antigravityCLIProvider) parseSessionWithStatus(
 	sess := &ParsedSession{
 		ID:                 antigravityCLIIDPrefix + storageID,
 		Project:            project,
+		Cwd:                cwd,
 		Machine:            machine,
 		Agent:              AgentAntigravityCLI,
 		FirstMessage:       firstMessage,
@@ -327,6 +339,14 @@ func (p *antigravityCLIProvider) parseSessionWithStatus(
 		return sess, nil, usageEvents, status, nil
 	}
 	return sess, messages, usageEvents, status, nil
+}
+
+func normalizeAntigravityCLIWorkspace(workspace string) string {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" || !filepath.IsAbs(workspace) {
+		return ""
+	}
+	return filepath.Clean(workspace)
 }
 
 func loadAntigravityCLIDBSteps(
@@ -458,6 +478,42 @@ func hasDisplayableAntigravityCLITrajectoryMessage(
 // often it runs.
 var buildAntigravityProjectMap = antigravityProjectMapFromHistory
 
+func buildAntigravityCLIProjectMap(root string) map[string]string {
+	out := buildAntigravityProjectMap(filepath.Join(root, "history.jsonl"))
+	for id, workspace := range antigravityProjectMapFromLastConversations(
+		filepath.Join(root, "cache", "last_conversations.json"),
+	) {
+		// The cache is the current CLI's exact workspace -> conversation map.
+		// Prefer it when a legacy history row names the same conversation.
+		out[id] = workspace
+	}
+	return out
+}
+
+// antigravityProjectMapFromLastConversations reverses the current CLI cache's
+// workspace -> conversationId object into the provider's
+// conversationId -> workspace lookup shape.
+func antigravityProjectMapFromLastConversations(path string) map[string]string {
+	out := make(map[string]string)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	root := gjson.ParseBytes(raw)
+	if !root.IsObject() {
+		return out
+	}
+	root.ForEach(func(workspace, conversationID gjson.Result) bool {
+		id := strings.TrimSpace(conversationID.String())
+		path := strings.TrimSpace(workspace.String())
+		if id != "" && path != "" {
+			out[id] = path
+		}
+		return true
+	})
+	return out
+}
+
 // antigravityProjectMapFromHistory reads history.jsonl and returns a
 // map of conversationId -> workspace path.
 func antigravityProjectMapFromHistory(path string) map[string]string {
@@ -481,11 +537,6 @@ func antigravityProjectMapFromHistory(path string) map[string]string {
 		}
 	}
 	return out
-}
-
-func inferAntigravityProject(path, id string) string {
-	m := buildAntigravityProjectMap(path)
-	return m[id]
 }
 
 func inferAntigravityProjectFromHistoryFallback(
@@ -858,16 +909,29 @@ func antigravityCompositeHashWithExtra(
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
-func antigravityCLICompositeHash(path, id string) (string, error) {
+func antigravityCLICompositeHash(path, id, workspace string) (string, error) {
 	return antigravityCompositeHashWithExtra(
 		path,
 		antigravityCLIProviderCompanionPaths(path),
 		func(h interface{ Write([]byte) (int, error) }) error {
-			return addAntigravityCLIHistoryFingerprintPart(
+			if err := addAntigravityCLIHistoryFingerprintPart(
 				h,
 				filepath.Join(filepath.Dir(filepath.Dir(path)), "history.jsonl"),
 				strings.TrimPrefix(id, antigravityImplicitTag),
-			)
+			); err != nil {
+				return err
+			}
+			if workspace == "" {
+				return nil
+			}
+			if _, err := fmt.Fprintf(h, "workspace\x00%d\x00", len(workspace)); err != nil {
+				return err
+			}
+			if _, err := h.Write([]byte(workspace)); err != nil {
+				return err
+			}
+			_, err := h.Write([]byte{0})
+			return err
 		},
 	)
 }

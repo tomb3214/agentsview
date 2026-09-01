@@ -428,7 +428,16 @@ CREATE INDEX IF NOT EXISTS idx_provider_freshness_updated_at
 // (91: Posit Assistant inferred cache-write normalization. Existing
 // non-Anthropic auto-cached model rows need re-parsing so their persisted
 // uncached prompt remainder is priced as input rather than cache creation.)
-const dataVersion = 91
+// (92: Antigravity CLI sessions recover CWD from the history workspace so
+// existing rows must be re-parsed to receive the normalized field.)
+// (93: Current Antigravity CLI sessions recover CWD from the exact
+// cache/last_conversations.json workspace mapping, while retaining history
+// compatibility.)
+// (94: Antigravity CLI keeps the exact approved workspace as CWD while
+// normalizing the project label for project-filtered PostgreSQL mirrors.)
+// (95: live linked-worktree Git identity takes precedence over lexical
+// manager layouts, including custom-named Codex worktree roots.)
+const dataVersion = 95
 
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 
