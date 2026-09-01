@@ -533,6 +533,9 @@ func (s *Sync) PushWithOptions(
 	}
 
 	if len(sessions) == 0 {
+		if err := s.syncRecallPublication(ctx, state, full); err != nil {
+			return result, err
+		}
 		if s.isFiltered() {
 			// Filtered pushes use filter-scoped sync state, so
 			// they can advance their own watermark without
@@ -657,6 +660,16 @@ func (s *Sync) PushWithOptions(
 				Errors:           result.Errors,
 			})
 		}
+	}
+	if result.Errors == 0 {
+		if err := s.syncRecallPublication(ctx, state, full); err != nil {
+			return result, err
+		}
+	} else {
+		log.Printf(
+			"pgsync: deferring Recall publication after %d session push errors",
+			result.Errors,
+		)
 	}
 
 	if s.isFiltered() {

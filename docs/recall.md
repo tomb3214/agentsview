@@ -301,7 +301,9 @@ delete or recreate the session archive as a Recall reset strategy.
 ## Experimental limits
 
 Recall remains an opt-in research feature. Automatic extraction never promotes
-entries into trusted Recall, and the session panel is inspection-only. There is
-no PostgreSQL or DuckDB Recall backend, no stable end-user import workflow, and
-no pruning policy for the measurement ledger yet. Expect corpus rebuilds as the
-schema, scoring, extraction policy, and trust model evolve.
+entries into trusted Recall, and the session panel is inspection-only. The
+PostgreSQL backend publishes the derived entry/evidence corpus and supports
+bounded lexical queries; vector state and the append-only measurement ledger
+remain local. There is no DuckDB Recall backend, stable end-user import
+workflow, or pruning policy for the measurement ledger yet. Expect corpus
+rebuilds as the schema, scoring, extraction policy, and trust model evolve.

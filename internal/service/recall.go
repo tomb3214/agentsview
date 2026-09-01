@@ -56,6 +56,7 @@ func QueryRecallStore(
 	query := db.RecallQuery{
 		Text:                req.Query,
 		Mode:                req.Mode,
+		Machine:             req.Machine,
 		Project:             req.Project,
 		CWD:                 req.CWD,
 		GitBranch:           req.GitBranch,

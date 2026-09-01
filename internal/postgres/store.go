@@ -342,24 +342,6 @@ func (s *Store) GetCachedInsight(
 	return &insight, nil
 }
 
-func (s *Store) ListRecallEntries(
-	_ context.Context, _ db.RecallQuery,
-) ([]db.RecallEntry, error) {
-	return nil, db.ErrReadOnly
-}
-
-func (s *Store) GetRecallEntry(
-	_ context.Context, _ string,
-) (*db.RecallEntry, error) {
-	return nil, db.ErrReadOnly
-}
-
-func (s *Store) QueryRecallEntries(
-	_ context.Context, _ db.RecallQuery,
-) (db.RecallPage, error) {
-	return db.RecallPage{}, db.ErrReadOnly
-}
-
 func (s *Store) RecordRecallQueryEvent(
 	_ context.Context, _ db.RecallQueryEvent,
 ) (string, error) {
