@@ -79,8 +79,15 @@ func (s *Server) humaScanSecrets(
 	if err := validateDateFilterValues("", in.DateFrom, in.DateTo, ""); err != nil {
 		return nil, err
 	}
+	scanService := s.sessions
 	if s.engine == nil {
-		return nil, apiError(http.StatusNotImplemented, "not available in remote mode")
+		local, ok := s.db.(*db.DB)
+		if !ok {
+			return nil, apiError(http.StatusNotImplemented, "not available in remote mode")
+		}
+		scanService = service.NewDirectBackend(
+			local, s.syncEngineForLocal(local),
+		)
 	}
 	return &huma.StreamResponse{Body: func(hctx huma.Context) {
 		stream, ok := newHumaSSEStream(hctx)
@@ -89,7 +96,7 @@ func (s *Server) humaScanSecrets(
 				apiErrorResponse{Message: "streaming not supported"})
 			return
 		}
-		summary, err := s.sessions.ScanSecrets(ctx, service.SecretScanInput{
+		summary, err := scanService.ScanSecrets(ctx, service.SecretScanInput{
 			Backfill: in.Backfill,
 			Project:  in.Project,
 			Agent:    in.Agent,
