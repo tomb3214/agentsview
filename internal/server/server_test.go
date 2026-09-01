@@ -1372,6 +1372,18 @@ func TestHumaScanSecretsEmitsSummaryEvent(t *testing.T) {
 	assert.Equal(t, "summary", events[len(events)-1].Event)
 }
 
+func TestHumaScanSecretsLocalNoSyncDaemonUsesOnDemandEngine(t *testing.T) {
+	t.Parallel()
+	te := setupNoSyncMode(t)
+
+	w := te.post(t, "/api/v1/secrets/scan?backfill=true", "")
+
+	assert.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	events := parseSSE(w.Body.String())
+	assert.NotEmpty(t, events)
+	assert.Equal(t, "summary", events[len(events)-1].Event)
+}
+
 func (te *testEnv) waitForSSEEvent(t *testing.T, w *flushRecorder, expectedEvent string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
