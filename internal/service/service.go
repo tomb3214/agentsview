@@ -217,6 +217,7 @@ type RecallQuery struct {
 	Query               string `json:"query"`
 	Mode                string `json:"mode,omitempty"`
 	Surface             string `json:"surface,omitempty"`
+	Machine             string `json:"machine,omitempty"`
 	Project             string `json:"project,omitempty"`
 	CWD                 string `json:"cwd,omitempty"`
 	GitBranch           string `json:"git_branch,omitempty"`

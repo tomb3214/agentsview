@@ -333,6 +333,71 @@ CREATE INDEX IF NOT EXISTS idx_pinned_source_uuid
     ON pinned_messages (session_id, source_uuid)
     WHERE source_uuid <> '';
 
+-- Recall is derived locally from eligible, secret-scanned human sessions and
+-- published through the existing per-machine push role. Query measurements
+-- and vector state remain local; this remote corpus is read-only at serve time.
+CREATE TABLE IF NOT EXISTS recall_entries (
+    id                  TEXT PRIMARY KEY,
+    machine             TEXT NOT NULL,
+    type                TEXT NOT NULL,
+    scope               TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'accepted',
+    review_state        TEXT NOT NULL DEFAULT 'unreviewed_auto',
+    title               TEXT NOT NULL,
+    body                TEXT NOT NULL,
+    trigger             TEXT NOT NULL DEFAULT '',
+    confidence          DOUBLE PRECISION,
+    uncertainty         TEXT NOT NULL DEFAULT '',
+    project             TEXT NOT NULL DEFAULT '',
+    cwd                 TEXT NOT NULL DEFAULT '',
+    git_branch          TEXT NOT NULL DEFAULT '',
+    agent               TEXT NOT NULL DEFAULT '',
+    source_session_id   TEXT NOT NULL,
+    source_episode_id   TEXT NOT NULL DEFAULT '',
+    source_run_id       TEXT NOT NULL DEFAULT '',
+    extractor_method    TEXT NOT NULL DEFAULT '',
+    model               TEXT NOT NULL DEFAULT '',
+    transferable        BOOLEAN NOT NULL DEFAULT FALSE,
+    provenance_ok       BOOLEAN NOT NULL DEFAULT FALSE,
+    supersedes_entry_id TEXT NOT NULL DEFAULT '',
+    superseded_by_entry_id TEXT NOT NULL DEFAULT '',
+    created_at          TIMESTAMPTZ NOT NULL,
+    updated_at          TIMESTAMPTZ NOT NULL,
+    FOREIGN KEY (source_session_id)
+        REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_recall_entries_machine_context
+    ON recall_entries (machine, project, cwd, git_branch, agent);
+CREATE INDEX IF NOT EXISTS idx_recall_entries_machine_status
+    ON recall_entries (machine, status, review_state, updated_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_recall_entries_source_session
+    ON recall_entries (source_session_id);
+CREATE INDEX IF NOT EXISTS idx_recall_entries_source_run
+    ON recall_entries (source_run_id, source_session_id, review_state);
+
+CREATE TABLE IF NOT EXISTS recall_evidence (
+    id                        BIGSERIAL PRIMARY KEY,
+    entry_id                  TEXT NOT NULL,
+    session_id                TEXT NOT NULL,
+    message_start_ordinal     INT NOT NULL,
+    message_end_ordinal       INT NOT NULL,
+    message_start_source_uuid TEXT NOT NULL DEFAULT '',
+    message_end_source_uuid   TEXT NOT NULL DEFAULT '',
+    content_digest            TEXT NOT NULL DEFAULT '',
+    tool_use_id               TEXT NOT NULL DEFAULT '',
+    snippet                   TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (entry_id)
+        REFERENCES recall_entries(id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id)
+        REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_recall_evidence_entry
+    ON recall_evidence (entry_id);
+CREATE INDEX IF NOT EXISTS idx_recall_evidence_session
+    ON recall_evidence (session_id);
+
 CREATE TABLE IF NOT EXISTS model_pricing (
     model_pattern TEXT PRIMARY KEY,
     input_microdollars_per_mtok BIGINT NOT NULL DEFAULT 0,

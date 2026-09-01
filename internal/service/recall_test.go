@@ -38,12 +38,14 @@ type observingRecallQueryStore struct {
 	db.Store
 	queryCalls  int
 	recordCalls int
+	lastQuery   db.RecallQuery
 }
 
 func (s *observingRecallQueryStore) QueryRecallEntries(
-	context.Context, db.RecallQuery,
+	_ context.Context, query db.RecallQuery,
 ) (db.RecallPage, error) {
 	s.queryCalls++
+	s.lastQuery = query
 	return db.RecallPage{}, nil
 }
 
@@ -77,6 +79,22 @@ func (s *readOnlyRecallListStore) QueryRecallEntries(
 }
 
 func (*readOnlyRecallListStore) ReadOnly() bool { return true }
+
+func TestQueryRecallStoreForwardsMachineScope(t *testing.T) {
+	store := &observingRecallQueryStore{Store: dbtest.OpenTestDB(t)}
+
+	_, err := service.QueryRecallStore(
+		context.Background(), store, service.RecallQuery{
+			Query: "deployment lesson", Machine: "karla-macbook",
+			SkipRecording: true,
+		},
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, "karla-macbook", store.lastQuery.Machine)
+	assert.Equal(t, 1, store.queryCalls)
+	assert.Zero(t, store.recordCalls)
+}
 
 func TestQueryRecallStoreTrustedOnlyRejectsArchivedStatus(t *testing.T) {
 	store := &observingRecallQueryStore{Store: dbtest.OpenTestDB(t)}

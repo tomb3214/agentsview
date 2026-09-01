@@ -26,6 +26,7 @@ const (
 
 type RecallEntry struct {
 	ID                  string           `json:"id"`
+	Machine             string           `json:"machine,omitempty"`
 	Type                string           `json:"type"`
 	Scope               string           `json:"scope"`
 	Status              string           `json:"status"`
@@ -87,6 +88,7 @@ type RecallEvidence struct {
 type RecallQuery struct {
 	Text                string
 	Mode                string
+	Machine             string
 	Project             string
 	CWD                 string
 	GitBranch           string
@@ -1186,6 +1188,14 @@ func (db *DB) queryRecallEntriesLexical(
 			return RecallPage{}, err
 		}
 	}
+	return RankRecallEntries(q, candidates), nil
+}
+
+// RankRecallEntries applies the canonical Recall lexical ranking and
+// diversification policy to a backend-provided candidate set. PostgreSQL and
+// SQLite share this path so remote Recall does not acquire different scoring
+// semantics.
+func RankRecallEntries(q RecallQuery, candidates []RecallEntry) RecallPage {
 	results := corerecall.Rank(toCoreRecallEntries(candidates), corerecall.Query{
 		Text:      q.Text,
 		Project:   q.Project,
@@ -1212,7 +1222,7 @@ func (db *DB) queryRecallEntriesLexical(
 			MatchedTerms:   result.MatchedTerms,
 		})
 	}
-	return page, nil
+	return page
 }
 
 func (db *DB) queryRecallEntriesVector(
@@ -1401,6 +1411,7 @@ func NormalizeRecallQuery(q RecallQuery) RecallQuery {
 	if q.Mode == "" {
 		q.Mode = RecallQueryModeLexical
 	}
+	q.Machine = strings.TrimSpace(q.Machine)
 	q.Project = strings.TrimSpace(q.Project)
 	q.CWD = strings.TrimSpace(q.CWD)
 	q.GitBranch = strings.TrimSpace(q.GitBranch)
@@ -1597,6 +1608,11 @@ func buildRecallEntryWhere(q RecallQuery, includeText bool) (string, []any) {
 	}
 	preds = append(preds, "status = ?")
 	args = append(args, status)
+	if q.Machine != "" {
+		preds = append(preds,
+			"source_session_id IN (SELECT id FROM sessions WHERE machine = ?)")
+		args = append(args, q.Machine)
+	}
 	if q.Project != "" {
 		preds = append(preds, "project = ?")
 		args = append(args, q.Project)
