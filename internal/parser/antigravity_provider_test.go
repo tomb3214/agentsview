@@ -284,9 +284,11 @@ func TestAntigravityCLIProviderUsesLastConversationsWorkspace(t *testing.T) {
 	root := t.TempDir()
 	id := "44444444-5555-6666-7777-888888888888"
 	writeAntigravityCLIProviderFixture(t, root, id)
+	workspace := filepath.Join(root, "cache-proj")
+	mustMkdir(t, workspace)
 	cachePath := filepath.Join(root, "cache", "last_conversations.json")
 	require.NoError(t, os.MkdirAll(filepath.Dir(cachePath), 0o755))
-	mustWrite(t, cachePath, []byte(`{"/tmp/cache-proj":"`+id+`"}`))
+	mustWrite(t, cachePath, []byte(`{"`+workspace+`":"`+id+`"}`))
 
 	provider, ok := NewProvider(AgentAntigravityCLI, ProviderConfig{
 		Roots: []string{root}, Machine: "devbox",
@@ -296,21 +298,23 @@ func TestAntigravityCLIProviderUsesLastConversationsWorkspace(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, discovered, 2)
 	conversation := discovered[0]
-	assert.Equal(t, "/tmp/cache-proj", conversation.ProjectHint)
+	assert.Equal(t, workspace, conversation.ProjectHint)
 	source, ok := conversation.Opaque.(antigravityCLISource)
 	require.True(t, ok)
-	assert.Equal(t, "/tmp/cache-proj", source.Workspace)
+	assert.Equal(t, workspace, source.Workspace)
 	parsed, err := provider.Parse(context.Background(), ParseRequest{
 		Source: conversation, Machine: "devbox",
 	})
 	require.NoError(t, err)
 	require.Len(t, parsed.Results, 1)
 	assert.Equal(t, "cache_proj", parsed.Results[0].Result.Session.Project)
-	assert.Equal(t, "/tmp/cache-proj", parsed.Results[0].Result.Session.Cwd)
+	assert.Equal(t, workspace, parsed.Results[0].Result.Session.Cwd)
 	before, err := provider.Fingerprint(context.Background(), conversation)
 	require.NoError(t, err)
 
-	mustWrite(t, cachePath, []byte(`{"/tmp/cache-proj-2":"`+id+`"}`))
+	workspace2 := filepath.Join(root, "cache-proj-2")
+	mustMkdir(t, workspace2)
+	mustWrite(t, cachePath, []byte(`{"`+workspace2+`":"`+id+`"}`))
 	changed, err := provider.SourcesForChangedPath(
 		context.Background(), ChangedPathRequest{Path: cachePath, EventKind: "write"},
 	)
@@ -319,7 +323,7 @@ func TestAntigravityCLIProviderUsesLastConversationsWorkspace(t *testing.T) {
 	conversation = changed[0]
 	source, ok = conversation.Opaque.(antigravityCLISource)
 	require.True(t, ok)
-	assert.Equal(t, "/tmp/cache-proj-2", source.Workspace)
+	assert.Equal(t, workspace2, source.Workspace)
 	after, err := provider.Fingerprint(context.Background(), conversation)
 	require.NoError(t, err)
 	assert.NotEqual(t, before.Hash, after.Hash)

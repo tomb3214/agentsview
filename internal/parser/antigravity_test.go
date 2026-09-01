@@ -392,6 +392,8 @@ func TestAntigravityCLIDiscoverAndParse(t *testing.T) {
 func TestAntigravityCLIDiscoverAndParseDB(t *testing.T) {
 	root := t.TempDir()
 	id := "33333333-4444-5555-6666-777777777777"
+	workspace := filepath.Join(root, "db-proj")
+	mustMkdir(t, workspace)
 
 	mustMkdir(t, filepath.Join(root, "conversations"))
 	mustMkdir(t, filepath.Join(root, "brain", id))
@@ -402,12 +404,12 @@ func TestAntigravityCLIDiscoverAndParseDB(t *testing.T) {
 		[]byte("old-encrypted-placeholder"))
 	mustWrite(t, filepath.Join(root, "history.jsonl"),
 		[]byte(`{"display":"db prompt fallback","timestamp":1779000000000,`+
-			`"workspace":"/tmp/db-proj","conversationId":"`+id+`"}`))
+			`"workspace":"`+workspace+`","conversationId":"`+id+`"}`))
 
 	files := discoverAntigravityCLITestSessions(t, root)
 	require.Len(t, files, 1, "discover")
 	assert.Equal(t, dbPath, files[0].Path, "prefer db over pb")
-	assert.Equal(t, "/tmp/db-proj", files[0].Project, "project")
+	assert.Equal(t, workspace, files[0].Project, "project")
 	assert.Equal(t, dbPath, findAntigravityCLITestSourceFile(t, root, id), "find")
 
 	sess, msgs, err := parseAntigravityCLITestSession(t,
@@ -418,7 +420,7 @@ func TestAntigravityCLIDiscoverAndParseDB(t *testing.T) {
 	assert.Equal(t, AgentAntigravityCLI, sess.Agent)
 	assert.Equal(t, dbPath, sess.File.Path)
 	assert.Equal(t, "db_proj", sess.Project)
-	assert.Equal(t, "/tmp/db-proj", sess.Cwd)
+	assert.Equal(t, workspace, sess.Cwd)
 	require.Len(t, msgs, 2)
 	assert.Equal(t, RoleUser, msgs[0].Role)
 	assert.Equal(t, "db prompt fallback", msgs[0].Content)
@@ -432,6 +434,8 @@ func TestAntigravityCLIDiscoverAndParseDB(t *testing.T) {
 func TestAntigravityCLIProjectFallbackPromptAndProximity(t *testing.T) {
 	root := t.TempDir()
 	id := "f0f0f0f0-f1f1-f2f2-f3f3-f4f4f4f4f4f4"
+	workspace := filepath.Join(root, "fallback-proj")
+	mustMkdir(t, workspace)
 
 	mustMkdir(t, filepath.Join(root, "conversations"))
 	mustMkdir(t, filepath.Join(root, "brain", id))
@@ -441,13 +445,13 @@ func TestAntigravityCLIProjectFallbackPromptAndProximity(t *testing.T) {
 
 	// Create history.jsonl with a row omitting conversationId, matching text, and close timestamp (1779000000000 ms)
 	mustWrite(t, filepath.Join(root, "history.jsonl"),
-		[]byte(`{"display":"  user prompt text goes here  ","timestamp":1779000010000,"workspace":"/tmp/fallback-proj"}`))
+		[]byte(`{"display":"  user prompt text goes here  ","timestamp":1779000010000,"workspace":"`+workspace+`"}`))
 
 	sess, msgs, err := parseAntigravityCLITestSession(t, dbPath, "", "m")
 	require.NoError(t, err)
 	require.Len(t, msgs, 2)
 	assert.Equal(t, "fallback_proj", sess.Project, "should normalize the inferred project label")
-	assert.Equal(t, "/tmp/fallback-proj", sess.Cwd, "should successfully fallback infer cwd")
+	assert.Equal(t, workspace, sess.Cwd, "should successfully fallback infer cwd")
 }
 
 func TestAntigravityCLIProjectFallbackStrictWindow(t *testing.T) {
