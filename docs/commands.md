@@ -631,6 +631,7 @@ agentsview pg push [target] [flags]
 | -------------------- | ------- | -------------------------------------------------------------- |
 | `--full`             | `false` | Force full local resync and re-push                            |
 | `--no-vectors`       | `false` | Skip the semantic-search vector phase for this run             |
+| `--recall-only`      | `false` | Push only Recall entries/evidence from a direct offline archive |
 | `--projects`         |         | Comma-separated projects to push (inclusive)                   |
 | `--exclude-projects` |         | Comma-separated projects to exclude from push                  |
 | `--all-projects`     | `false` | Ignore configured project filters for this run                 |

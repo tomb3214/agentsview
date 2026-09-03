@@ -73,6 +73,40 @@ func TestDaemonPushProgressSilencesHeartbeat(t *testing.T) {
 		"heartbeat must stay silent after the first progress event")
 }
 
+func TestDaemonArchiveWriteBackendRejectsRecallOnly(t *testing.T) {
+	backend := daemonArchiveWriteBackend{}
+	_, err := backend.PGPush(
+		context.Background(), pgTargetSelection{},
+		PGPushConfig{RecallOnly: true}, nil, nil,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "direct offline archive access")
+}
+
+func TestLocalArchiveWriteBackendRecallOnlySkipsSourceSync(t *testing.T) {
+	backend := testLocalArchiveWriteBackend(t)
+	original := runLocalSyncForPGPush
+	syncCalls := 0
+	runLocalSyncForPGPush = func(
+		context.Context, config.Config, *db.DB, bool,
+	) bool {
+		syncCalls++
+		return false
+	}
+	t.Cleanup(func() { runLocalSyncForPGPush = original })
+
+	_, err := backend.PGPush(
+		context.Background(),
+		pgTargetSelection{PG: config.PGConfig{
+			URL: unreachablePGURL, AllowInsecure: true,
+		}},
+		PGPushConfig{RecallOnly: true}, nil, nil,
+	)
+
+	require.Error(t, err)
+	assert.Zero(t, syncCalls, "Recall-only publication must not run source sync")
+}
+
 // syncBuffer is a mutex-guarded bytes.Buffer: the heartbeat goroutine writes
 // while the test reads.
 type syncBuffer struct {

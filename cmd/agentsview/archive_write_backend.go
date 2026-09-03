@@ -55,6 +55,8 @@ type archiveWriteBackend interface {
 	) error
 }
 
+var runLocalSyncForPGPush = runLocalSync
+
 // archivePushWatchHooks exposes only the slow/nondeterministic owner boundaries
 // needed to verify production startup ordering. Nil hooks use the real watcher,
 // timers, push implementations, and local startup sync.
@@ -483,6 +485,11 @@ func (b daemonArchiveWriteBackend) PGPush(
 	projects []string,
 	excludeProjects []string,
 ) (postgres.PushResult, error) {
+	if cfg.RecallOnly {
+		return postgres.PushResult{}, fmt.Errorf(
+			"--recall-only requires direct offline archive access; stop the local daemon or set AGENTSVIEW_NO_DAEMON=1",
+		)
+	}
 	onProgress, finish := daemonPushProgress(
 		"PostgreSQL", newPGPushProgressPrinter(),
 	)
@@ -778,7 +785,37 @@ func (b *localArchiveWriteBackend) PGPush(
 	projects []string,
 	excludeProjects []string,
 ) (postgres.PushResult, error) {
-	didResync := runLocalSync(ctx, b.appCfg, b.database, cfg.Full)
+	if cfg.RecallOnly {
+		if err := ctx.Err(); err != nil {
+			return postgres.PushResult{}, err
+		}
+		fmt.Println("Connecting to PostgreSQL...")
+		connectStart := time.Now()
+		applyClassifierConfig(b.appCfg)
+		ps, err := postgres.New(
+			target.PG.URL, target.PG.Schema, b.database,
+			target.PG.MachineName, target.PG.AllowInsecure,
+			target.syncOptions(projects, excludeProjects, nil),
+		)
+		if err != nil {
+			return postgres.PushResult{}, err
+		}
+		defer ps.Close()
+		fmt.Printf(
+			"Connected to PostgreSQL in %s\n",
+			time.Since(connectStart).Round(time.Millisecond),
+		)
+		fmt.Println("Preparing PostgreSQL schema...")
+		if err := ps.EnsureSchema(ctx); err != nil {
+			return postgres.PushResult{}, fmt.Errorf("schema: %w", err)
+		}
+		fmt.Println("Starting Recall-only PostgreSQL push...")
+		if err := ps.PushRecall(ctx, cfg.Full); err != nil {
+			return postgres.PushResult{}, err
+		}
+		return postgres.PushResult{}, nil
+	}
+	didResync := runLocalSyncForPGPush(ctx, b.appCfg, b.database, cfg.Full)
 	if err := ctx.Err(); err != nil {
 		return postgres.PushResult{}, err
 	}

@@ -30,6 +30,10 @@ type PGPushConfig struct {
 	Debounce        time.Duration
 	Interval        time.Duration
 	NoVectors       bool
+	// RecallOnly publishes only Recall entries and evidence. It is restricted
+	// to direct/offline archive access so an older daemon can never ignore the
+	// new request scope and accidentally perform a normal session push.
+	RecallOnly bool
 	// ScopeVectorsToChangedSessions is set internally by the watch
 	// loop for change-triggered pushes; it has no CLI flag.
 	ScopeVectorsToChangedSessions bool
@@ -188,6 +192,10 @@ func runPGPushTarget(
 	)
 	if err != nil {
 		return err
+	}
+	if cfg.RecallOnly {
+		fmt.Println("Recall publication complete")
+		return nil
 	}
 	writePGPushSummary(os.Stdout, result)
 	if result.Errors > 0 {
