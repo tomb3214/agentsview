@@ -1650,6 +1650,28 @@ func (d *DB) CopySessionMetadataFrom(
 		}
 	}
 
+	// Preserve intentional source retirement only when the rebuilt session
+	// still has the exact machine, provider, path, and content hash that was
+	// proven before local offload. A changed source naturally loses the
+	// exemption and returns to ordinary watcher reconciliation.
+	if oldDBHasTable(ctx, tx, "local_session_source_retirements") {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR REPLACE INTO main.local_session_source_retirements
+				(session_id, machine, agent, file_path, file_hash, retired_at)
+			SELECT r.session_id, r.machine, r.agent, r.file_path,
+				r.file_hash, r.retired_at
+			FROM old_db.local_session_source_retirements AS r
+			JOIN main.sessions AS s
+			  ON s.id = r.session_id
+			 AND s.machine = r.machine
+			 AND s.agent = r.agent
+			 AND s.file_path = r.file_path
+			 AND s.file_hash = r.file_hash
+			WHERE s.deleted_at IS NULL`); err != nil {
+			return fmt.Errorf("copying session source retirements: %w", err)
+		}
+	}
+
 	return tx.Commit()
 }
 
@@ -1890,6 +1912,11 @@ func copySessionDataForIDs(
 	); err != nil {
 		return fmt.Errorf("copying sessions: %w", err)
 	}
+	if err := copySessionSourceRetirementsForIDs(
+		ctx, tx, tempIDsTable,
+	); err != nil {
+		return err
+	}
 
 	// Copy messages. Omit id to let auto-increment assign
 	// new IDs (old IDs may collide with freshly synced
@@ -2047,6 +2074,32 @@ func copySessionDataForIDs(
 
 	if err := copyPinnedMessagesForIDs(ctx, tx, tempIDsTable); err != nil {
 		return err
+	}
+	return nil
+}
+
+func copySessionSourceRetirementsForIDs(
+	ctx context.Context,
+	tx *sql.Tx,
+	tempIDsTable string,
+) error {
+	if !oldDBHasTable(ctx, tx, "local_session_source_retirements") {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR REPLACE INTO main.local_session_source_retirements
+			(session_id, machine, agent, file_path, file_hash, retired_at)
+		SELECT r.session_id, r.machine, r.agent, r.file_path, r.file_hash, r.retired_at
+		FROM old_db.local_session_source_retirements AS r
+		JOIN main.sessions AS s
+		  ON s.id = r.session_id
+		 AND s.machine = r.machine
+		 AND s.agent = r.agent
+		 AND s.file_path = r.file_path
+		 AND s.file_hash = r.file_hash
+		WHERE r.session_id IN (SELECT id FROM `+tempIDsTable+`)`,
+	); err != nil {
+		return fmt.Errorf("copying session source retirements: %w", err)
 	}
 	return nil
 }

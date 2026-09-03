@@ -485,6 +485,18 @@ func (b *directBackend) Sync(
 	return detail, nil
 }
 
+func (b *directBackend) RetireSessionSource(
+	ctx context.Context,
+	in SessionSourceRetirementInput,
+) (*db.SessionSourceRetirement, error) {
+	if b.local == nil {
+		return nil, db.ErrReadOnly
+	}
+	return b.local.RetireSessionSourceOwnership(
+		ctx, in.Machine, in.Agent, in.SessionID, in.FilePath, in.FileHash,
+	)
+}
+
 func syncSessionNotFoundError(id string) error {
 	return fmt.Errorf("sync: session %q was not found after sync", id)
 }

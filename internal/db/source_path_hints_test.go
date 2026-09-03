@@ -940,6 +940,100 @@ func TestSourceMissingTombstoneIsNotUserTrash(t *testing.T) {
 	assertDeletionState(t, d, "missing", true, deletionCauseSourceMissing)
 }
 
+func TestRetireSessionSourceOwnershipPreservesSearchableRow(t *testing.T) {
+	d := testDB(t)
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	insertSessionWithSourcePath(t, d, "codex:archived", "codex", path)
+	_, err := d.getWriter().Exec(
+		"UPDATE sessions SET file_hash = ?, message_count = 4 WHERE id = ?",
+		hash, "codex:archived",
+	)
+	require.NoError(t, err)
+	baselineSessionSource(t, d, defaultMachine, "codex", path)
+
+	receipt, err := d.RetireSessionSourceOwnership(
+		t.Context(), defaultMachine, "codex", "codex:archived", path, hash,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 4, receipt.MessageCount)
+	assert.NotEmpty(t, receipt.RetiredAt)
+	assert.Empty(t, listBaselineOwnership(t, d, defaultMachine))
+
+	changed, err := d.SoftDeleteSessionSourceOwnership(
+		t.Context(), defaultMachine, "codex", "codex:archived", path,
+	)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	stored, err := d.GetSession(t.Context(), "codex:archived")
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Nil(t, stored.DeletedAt)
+
+	// The same exact request is idempotent after the baseline has gone.
+	again, err := d.RetireSessionSourceOwnership(
+		t.Context(), defaultMachine, "codex", "codex:archived", path, hash,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, receipt.RetiredAt, again.RetiredAt)
+}
+
+func TestRetireSessionSourceOwnershipFailsClosedOnMismatch(t *testing.T) {
+	d := testDB(t)
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	const hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	insertSessionWithSourcePath(t, d, "codex:archived", "codex", path)
+	_, err := d.getWriter().Exec(
+		"UPDATE sessions SET file_hash = ?, message_count = 1 WHERE id = ?",
+		hash, "codex:archived",
+	)
+	require.NoError(t, err)
+	baselineSessionSource(t, d, defaultMachine, "codex", path)
+
+	_, err = d.RetireSessionSourceOwnership(
+		t.Context(), defaultMachine, "codex", "codex:archived", path,
+		"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+	)
+	require.ErrorContains(t, err, "did not match")
+	assert.Contains(t, listBaselineOwnership(t, d, defaultMachine), "codex:archived")
+}
+
+func TestRetiredSessionSourceSurvivesOrphanCopy(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "source.db")
+	rolloutPath := filepath.Join(dir, "archived.jsonl")
+	const hash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	source := testDBAtPath(t, sourcePath, "source")
+	insertSessionWithSourcePath(t, source, "codex:archived", "codex", rolloutPath)
+	_, err := source.getWriter().Exec(
+		"UPDATE sessions SET file_hash = ?, message_count = 1 WHERE id = ?",
+		hash, "codex:archived",
+	)
+	require.NoError(t, err)
+	baselineSessionSource(t, source, defaultMachine, "codex", rolloutPath)
+	_, err = source.RetireSessionSourceOwnership(
+		t.Context(), defaultMachine, "codex", "codex:archived", rolloutPath, hash,
+	)
+	require.NoError(t, err)
+	require.NoError(t, source.Close())
+
+	destination := testDBAtPath(t, filepath.Join(dir, "destination.db"), "destination")
+	defer destination.Close()
+	copied, err := destination.CopyOrphanedDataFrom(sourcePath)
+	require.NoError(t, err)
+	require.Equal(t, 1, copied)
+
+	changed, err := destination.SoftDeleteSessionSourceOwnership(
+		t.Context(), defaultMachine, "codex", "codex:archived", rolloutPath,
+	)
+	require.NoError(t, err)
+	assert.False(t, changed, "full rebuild must preserve intentional source retirement")
+	stored, err := destination.GetSession(t.Context(), "codex:archived")
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Nil(t, stored.DeletedAt)
+}
+
 func insertSessionWithSourcePath(
 	t *testing.T,
 	d *DB,

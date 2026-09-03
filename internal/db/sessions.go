@@ -3812,6 +3812,14 @@ func (db *DB) listActiveSessionSourceOwnershipScopeBatch(
 		WHERE b.machine = ?
 		  AND b.agent = ?
 		  AND s.deleted_at IS NULL
+		  AND NOT EXISTS (
+			SELECT 1 FROM local_session_source_retirements AS r
+			WHERE r.session_id = s.id
+			  AND r.machine = s.machine
+			  AND r.agent = s.agent
+			  AND r.file_path = s.file_path
+			  AND r.file_hash = s.file_hash
+		  )
 		  AND `+rootClause+`
 		  AND (b.file_path > ? OR (b.file_path = ? AND b.session_id > ?))
 		ORDER BY b.file_path, b.session_id
@@ -4437,6 +4445,14 @@ func (db *DB) SoftDeleteSessionSourceOwnership(
 		    local_modified_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
 		WHERE machine = ? AND agent = ? AND id = ? AND file_path = ?
 		  AND deleted_at IS NULL
+		  AND NOT EXISTS (
+			SELECT 1 FROM local_session_source_retirements AS r
+			WHERE r.session_id = sessions.id
+			  AND r.machine = sessions.machine
+			  AND r.agent = sessions.agent
+			  AND r.file_path = sessions.file_path
+			  AND r.file_hash = sessions.file_hash
+		  )
 		  AND EXISTS (
 			SELECT 1 FROM local_session_source_baselines AS b
 			WHERE b.session_id = sessions.id
@@ -4454,6 +4470,110 @@ func (db *DB) SoftDeleteSessionSourceOwnership(
 		return false, fmt.Errorf("counting exact session source tombstone: %w", err)
 	}
 	return count > 0, nil
+}
+
+// SessionSourceRetirement is the metadata-only receipt returned after an exact
+// local native source is made safe for intentional offload. It does not remove
+// the source file or the searchable session row.
+type SessionSourceRetirement struct {
+	SessionID    string `json:"session_id"`
+	Machine      string `json:"machine"`
+	Agent        string `json:"agent"`
+	FilePath     string `json:"file_path"`
+	FileHash     string `json:"file_hash"`
+	MessageCount int    `json:"message_count"`
+	RetiredAt    string `json:"retired_at"`
+}
+
+// RetireSessionSourceOwnership records an exact content-addressed exemption
+// from source-missing reconciliation. Every supplied identity field must match
+// the active searchable row and its current watcher baseline. Repeating the
+// same request is idempotent; a changed path, owner, or hash fails closed.
+func (db *DB) RetireSessionSourceOwnership(
+	ctx context.Context,
+	machine string,
+	agent string,
+	id string,
+	filePath string,
+	fileHash string,
+) (*SessionSourceRetirement, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if machine == "" || agent == "" || id == "" || filePath == "" || fileHash == "" {
+		return nil, errors.New("retiring session source requires exact identity and hash")
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	tx, err := db.getWriter().BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("starting session source retirement: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var receipt SessionSourceRetirement
+	err = tx.QueryRowContext(ctx, `
+		SELECT s.id, s.machine, s.agent, s.file_path, s.file_hash,
+		       s.message_count,
+		       COALESCE(r.retired_at, '')
+		FROM sessions AS s
+		LEFT JOIN local_session_source_retirements AS r
+		  ON r.session_id = s.id
+		 AND r.machine = s.machine
+		 AND r.agent = s.agent
+		 AND r.file_path = s.file_path
+		 AND r.file_hash = s.file_hash
+		WHERE s.id = ? AND s.machine = ? AND s.agent = ? AND s.file_path = ?
+		  AND s.file_hash = ? AND s.deleted_at IS NULL
+		  AND s.message_count > 0
+		  AND (
+			r.session_id IS NOT NULL OR EXISTS (
+				SELECT 1 FROM local_session_source_baselines AS b
+				WHERE b.session_id = s.id
+				  AND b.machine = s.machine
+				  AND b.agent = s.agent
+				  AND b.file_path = s.file_path
+			)
+		  )`, id, machine, agent, filePath, fileHash,
+	).Scan(
+		&receipt.SessionID, &receipt.Machine, &receipt.Agent,
+		&receipt.FilePath, &receipt.FileHash, &receipt.MessageCount,
+		&receipt.RetiredAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errors.New("session source retirement identity, hash, searchability, or baseline did not match")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("checking session source retirement: %w", err)
+	}
+	if receipt.RetiredAt == "" {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO local_session_source_retirements
+				(session_id, machine, agent, file_path, file_hash)
+			VALUES (?, ?, ?, ?, ?)`,
+			receipt.SessionID, receipt.Machine, receipt.Agent,
+			receipt.FilePath, receipt.FileHash,
+		); err != nil {
+			return nil, fmt.Errorf("recording session source retirement: %w", err)
+		}
+		if err := tx.QueryRowContext(ctx, `
+			SELECT retired_at FROM local_session_source_retirements
+			WHERE session_id = ?`, receipt.SessionID,
+		).Scan(&receipt.RetiredAt); err != nil {
+			return nil, fmt.Errorf("reading session source retirement receipt: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM local_session_source_baselines
+		WHERE session_id = ? AND machine = ? AND agent = ? AND file_path = ?`,
+		receipt.SessionID, receipt.Machine, receipt.Agent, receipt.FilePath,
+	); err != nil {
+		return nil, fmt.Errorf("retiring session source baseline: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing session source retirement: %w", err)
+	}
+	return &receipt, nil
 }
 
 // ListStoredSourcePathHints returns active source paths for agent whose stored

@@ -91,6 +91,25 @@ type SessionService interface {
 		progress func(SecretScanProgress)) (*SecretScanSummary, error)
 }
 
+// SessionSourceOffloader is the narrow write capability used by managed
+// archival lifecycles. It is separate from SessionService so read-only and
+// third-party service implementations do not gain a destructive-looking
+// surface they cannot support. The operation itself never deletes a file or a
+// session; it records exact content-addressed source-retirement proof.
+type SessionSourceOffloader interface {
+	RetireSessionSource(
+		ctx context.Context, in SessionSourceRetirementInput,
+	) (*db.SessionSourceRetirement, error)
+}
+
+type SessionSourceRetirementInput struct {
+	SessionID string `json:"session_id"`
+	Machine   string `json:"machine"`
+	Agent     string `json:"agent"`
+	FilePath  string `json:"file_path"`
+	FileHash  string `json:"file_hash"`
+}
+
 // SecretScanInput parameterises ScanSecrets (mirrors sync.SecretScanInput).
 type SecretScanInput struct {
 	Backfill bool
