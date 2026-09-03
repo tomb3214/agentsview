@@ -180,6 +180,38 @@ func Redact(text string) string {
 	return redactSpans(text, scanRaw(text))
 }
 
+// RedactOpaque replaces every secret-shaped span with a fixed marker. Unlike
+// Redact, it retains no prefix or suffix from the matched value, so the result
+// is suitable for sending to an external model. Overlapping findings collapse
+// into one marker and no raw credential fragment survives.
+func RedactOpaque(text string) string {
+	raw := scanRaw(text)
+	if len(raw) == 0 {
+		return text
+	}
+	type span struct{ start, end int }
+	spans := make([]span, 0, len(raw))
+	for _, m := range raw {
+		n := len(spans)
+		if n > 0 && m.Start < spans[n-1].end {
+			if m.End > spans[n-1].end {
+				spans[n-1].end = m.End
+			}
+			continue
+		}
+		spans = append(spans, span{start: m.Start, end: m.End})
+	}
+	var b strings.Builder
+	prev := 0
+	for _, s := range spans {
+		b.WriteString(text[prev:s.start])
+		b.WriteString("[REDACTED_SECRET]")
+		prev = s.end
+	}
+	b.WriteString(text[prev:])
+	return b.String()
+}
+
 // redactSpans masks the secret spans raw within text and returns the result.
 // raw must be the matches for text (offsets relative to text), sorted by Start
 // ascending then End descending — the order scanRaw produces. Overlapping spans

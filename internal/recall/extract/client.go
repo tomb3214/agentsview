@@ -159,7 +159,7 @@ const maxRetryDelay = 30 * time.Second
 // v3: truncation always splits; the entry-capped compact retry is gone.
 // v4: maxItems/maxLength bounds on entries, fields, and entities.
 // v5: body maxLength is enforced client-side only for grammar compatibility.
-const extractionProtocolVersion = 5
+const extractionProtocolVersion = 6
 
 // Local resource bounds on a single distill response. The transport cap
 // only bounds bytes; within it a compromised or misconfigured endpoint

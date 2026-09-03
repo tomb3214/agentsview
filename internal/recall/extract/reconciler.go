@@ -10,8 +10,9 @@ import (
 // eligibility, independently of the model-backed extraction loop. The daemon
 // runs it even when [recall.extract] is disabled: a generation activated
 // while extraction was enabled keeps serving its entries, and those must
-// stop being served once their source session is trashed, flagged
-// automated, or gains secret findings. Gating retraction on extraction being
+// stop being served once their source session is trashed or flagged automated.
+// Secret findings are redacted before model extraction and therefore do not
+// make an otherwise human session ineligible. Gating retraction on extraction being
 // enabled would leave that privacy obligation unmet.
 //
 // It implements the same TryPass shape the scheduler drives Manager with, so

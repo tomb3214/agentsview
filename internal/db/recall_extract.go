@@ -37,7 +37,7 @@ var ErrStaleExtractProgress = errors.New("extract progress is stale")
 // ErrExtractSessionDrifted reports that a guarded commit found the session
 // changed or no longer eligible: the transcript state the caller derived its
 // unit from is not the state on disk, or the session was trashed, flagged
-// automated, or gained secret findings. Nothing was persisted.
+// automated. Nothing was persisted.
 var ErrExtractSessionDrifted = errors.New(
 	"extract session drifted during commit")
 
@@ -269,7 +269,7 @@ func (db *DB) ActivateExtractGeneration(
 	// Promotion re-verifies full eligibility inside the activation
 	// transaction, and clears — not merely skips — what fails it. Any
 	// session no longer fully eligible (trashed, flagged automated,
-	// carrying findings, reopened, back inside the quiet period, awaiting
+	// reopened, back inside the quiet period, awaiting
 	// rescan, or gone entirely) has its staged output and progress rows
 	// deleted: an archived entry under a surviving progress row would
 	// never be promoted or rediscovered once the generation is active —
@@ -1148,7 +1148,10 @@ const extractTimeLayout = "2006-01-02T15:04:05.000Z"
 // value retries nothing — a caller that forgets to set it can never cause a
 // retry storm. ScanVersions are the secret-scan rules versions considered
 // current; sessions whose last scan is missing or stale are excluded, and an
-// empty list is an error rather than "trust everything". IncludeDone
+// empty list is an error rather than "trust everything". Recorded findings do
+// not make a session ineligible: the extraction manager redacts model-visible
+// message content, while tool payloads never reach Recall extraction.
+// IncludeDone
 // revisits completed sessions so their content digests can be rechecked, but
 // only those written to since extraction finished.
 type ExtractCandidateQuery struct {
@@ -1179,11 +1182,7 @@ type ExtractCandidateQuery struct {
 // consumes len(ScanVersions)+1 args: the versions, then the quiet cutoff.
 const extractEligibleSessionSQL = `s.deleted_at IS NULL
 	AND s.is_automated = 0
-	AND s.secret_leak_count = 0
 	AND s.secrets_rules_version IN (%s)
-	AND NOT EXISTS (
-		SELECT 1 FROM secret_findings sf WHERE sf.session_id = s.id
-	)
 	AND s.message_count > 0
 	AND s.ended_at IS NOT NULL
 	AND s.ended_at != ''
@@ -1314,9 +1313,10 @@ func extractCandidateSQL(q ExtractCandidateQuery) (string, []any, error) {
 }
 
 // ExtractCandidates returns eligible session ids, oldest ended first.
-// Eligibility encodes the extraction privacy boundary and is deliberately
-// not configurable: automated sessions, trashed sessions, and sessions with
-// any secret findings never reach the extraction model.
+// Eligibility encodes the extraction boundary and is deliberately not
+// configurable: automated and trashed sessions never reach the extraction
+// model. Model-visible message content is redacted and re-scanned by the
+// extraction manager before it leaves the device.
 func (db *DB) ExtractCandidates(
 	ctx context.Context, q ExtractCandidateQuery,
 ) ([]string, error) {
@@ -1424,8 +1424,8 @@ type ExtractUnitCommit struct {
 	Entries            []RecallEntry
 }
 
-// CommitExtractedUnit atomically re-verifies the session (eligibility,
-// absence of secret findings, and an unchanged snapshot), binds each
+// CommitExtractedUnit atomically re-verifies the session (eligibility and an
+// unchanged snapshot), binds each
 // entry's evidence to the host transcript (content digest and stable
 // endpoint UUIDs — without them the evidence reconciler revokes provenance
 // on the first transcript write), inserts the entries, and advances the
@@ -1526,15 +1526,15 @@ func verifyExtractSessionGuardTx(
 	var (
 		deletedAt, revision, localModified, endedAt sql.NullString
 		isAutomated                                 bool
-		leakCount, messageCount                     int
+		messageCount                                int
 		rulesVersion                                string
 	)
 	err := tx.QueryRowContext(ctx, `
-		SELECT deleted_at, is_automated, secret_leak_count,
+		SELECT deleted_at, is_automated,
 		       secrets_rules_version, message_count,
 		       transcript_revision, local_modified_at, ended_at
 		FROM sessions WHERE id = ?`, u.SessionID,
-	).Scan(&deletedAt, &isAutomated, &leakCount, &rulesVersion,
+	).Scan(&deletedAt, &isAutomated, &rulesVersion,
 		&messageCount, &revision, &localModified, &endedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return extractDriftErrorf("session %s vanished", u.SessionID)
@@ -1550,9 +1550,6 @@ func verifyExtractSessionGuardTx(
 	case isAutomated:
 		return extractDriftErrorf(
 			"session %s was flagged automated", u.SessionID)
-	case leakCount > 0:
-		return extractDriftErrorf(
-			"session %s gained %d secret leaks", u.SessionID, leakCount)
 	case !versionOK:
 		return extractDriftErrorf(
 			"session %s lost its current secret scan", u.SessionID)
@@ -1573,18 +1570,6 @@ func verifyExtractSessionGuardTx(
 		return extractDriftErrorf(
 			"session %s was reopened or re-dated during distillation",
 			u.SessionID)
-	}
-	var findings int
-	if err := tx.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM secret_findings WHERE session_id = ?",
-		u.SessionID,
-	).Scan(&findings); err != nil {
-		return fmt.Errorf(
-			"counting findings for session %s: %w", u.SessionID, err)
-	}
-	if findings > 0 {
-		return extractDriftErrorf(
-			"session %s gained %d secret findings", u.SessionID, findings)
 	}
 	return nil
 }
@@ -1652,15 +1637,14 @@ func bindExtractedEvidenceTx(
 }
 
 // extractSessionIneligibleSQL matches sessions (aliased s) whose extraction
-// output must be retracted: trashed, flagged automated, or carrying secret
-// findings or leaks. Stale or missing scan versions deliberately do not
+// output must be retracted: trashed or flagged automated. Secret findings are
+// redacted from model-visible content and do not invalidate derived output.
+// Stale or missing scan versions deliberately do not
 // qualify — they are transient (every transcript write clears the stamp
 // until rescan) and retracting on them would rebuild the corpus on every
 // sync.
 const extractSessionIneligibleSQL = `s.deleted_at IS NOT NULL
-	OR s.is_automated != 0
-	OR s.secret_leak_count > 0
-	OR EXISTS (SELECT 1 FROM secret_findings sf WHERE sf.session_id = s.id)`
+	OR s.is_automated != 0`
 
 // ReconcileIneligibleExtractSessions removes the generated corpus of
 // sessions that lost extraction eligibility after extraction. It is

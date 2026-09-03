@@ -1133,7 +1133,7 @@ func TestManagerRefusesDefiniteOnlyScan(t *testing.T) {
 	}
 }
 
-func TestManagerRefusesSessionsWithCandidateFindings(t *testing.T) {
+func TestManagerExtractsSessionsWithCandidateFindings(t *testing.T) {
 	d := newTestArchive(t)
 	ctx := context.Background()
 	server, log := modelServer(t, alwaysEntries(t, "x"))
@@ -1159,17 +1159,9 @@ func TestManagerRefusesSessionsWithCandidateFindings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunPass: %v", err)
 	}
-	if result.Sessions != 0 || log.count() != 0 {
-		t.Fatalf("session with a candidate finding reached the model: %+v, "+
+	if result.Sessions != 1 || log.count() == 0 {
+		t.Fatalf("session with a candidate finding was discarded: %+v, "+
 			"%d calls", result, log.count())
-	}
-
-	_, err = m.RunPass(ctx, PassOptions{SessionID: "sess-candidate"})
-	if err == nil {
-		t.Fatal("explicit run on a session with candidate findings must be refused")
-	}
-	if log.count() != 0 {
-		t.Fatal("refusal must happen before any model call")
 	}
 }
 
@@ -1736,15 +1728,14 @@ func TestManagerDiscardsSessionTrashedMidExtraction(t *testing.T) {
 	}
 }
 
-func TestManagerStopsWhenSecretFindingAppearsMidExtraction(t *testing.T) {
+func TestManagerRetriesWhenSecretScanChangesMidExtraction(t *testing.T) {
 	d := newTestArchive(t)
 	ctx := context.Background()
 	server, log := modelServer(t, func(_ string, call int) (int, string) {
 		if call == 2 {
-			// A candidate-confidence finding lands mid-extraction under
-			// the same rules version: no snapshot field changes except
-			// the local write stamp, but the material must not reach the
-			// model and already-extracted output must not persist.
+			// A finding landing mid-extraction changes the session write
+			// stamp. This pass must stop using its stale snapshot; the next
+			// pass can safely continue from freshly redacted input.
 			finding := db.SecretFinding{
 				SessionID: "sess-1", RuleName: "jwt",
 				Confidence: "candidate", LocationKind: "message",
@@ -1766,24 +1757,16 @@ func TestManagerStopsWhenSecretFindingAppearsMidExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunPass: %v", err)
 	}
-	if log.count() != 2 {
-		t.Fatalf("model calls = %d, want 2: units after the finding must "+
-			"not reach the model", log.count())
+	if log.count() != 2 || result.Sessions != 0 || result.Failed != 0 {
+		t.Fatalf("stale scan snapshot was not stopped cleanly: calls=%d result=%+v",
+			log.count(), result)
 	}
-	if result.Failed != 1 {
-		t.Fatalf("result = %+v, want the session recorded as a failure "+
-			"with discarded output", result)
+	result, err = m.RunPass(ctx, PassOptions{})
+	if err != nil {
+		t.Fatalf("retry RunPass: %v", err)
 	}
-	for _, status := range []string{"", "archived"} {
-		entries, err := d.ListRecallEntries(ctx,
-			db.RecallQuery{Status: status, Limit: 50})
-		if err != nil {
-			t.Fatalf("ListRecallEntries(%q): %v", status, err)
-		}
-		if len(entries) != 0 {
-			t.Fatalf("%d %q entries persisted after a secret finding "+
-				"appeared mid-extraction; want none", len(entries), status)
-		}
+	if result.Sessions != 1 {
+		t.Fatalf("retry did not complete the redacted session: %+v", result)
 	}
 }
 
@@ -2811,12 +2794,12 @@ func TestManagerRevisitRestoresRevokedProvenance(t *testing.T) {
 	}
 }
 
-// TestManagerRunPassRefusesTranscriptMatchingSecretRules covers the stale
+// TestManagerRunPassRedactsTranscriptMatchingSecretRules covers the stale
 // scan stamp: archives written by older binaries can carry a current-looking
 // clean stamp over content the scan never saw (an incremental append whose
 // deferred rescan crashed before it landed). The stamp is only a claim; the
 // boundary must re-check the content it actually sends.
-func TestManagerRunPassRefusesTranscriptMatchingSecretRules(t *testing.T) {
+func TestManagerRunPassRedactsTranscriptMatchingSecretRules(t *testing.T) {
 	d := newTestArchive(t)
 	ctx := context.Background()
 	server, log := modelServer(t, alwaysEntries(t, "x"))
@@ -2829,25 +2812,23 @@ func TestManagerRunPassRefusesTranscriptMatchingSecretRules(t *testing.T) {
 
 	result, err := m.RunPass(ctx, PassOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, 0, log.count(),
-		"secret-bearing transcript must never reach the model")
-	assert.Equal(t, 1, result.Failed)
-	assert.Zero(t, result.Sessions)
-	assert.Zero(t, result.Entries)
-
-	progress, found, err := d.ExtractProgress(ctx, "sess-1", m.Fingerprint())
-	require.NoError(t, err)
-	require.True(t, found)
-	assert.Equal(t, db.ExtractProgressFailed, progress.State)
-	assert.Contains(t, progress.LastError, "secrets scan --backfill")
+	assert.Positive(t, log.count())
+	assert.Zero(t, result.Failed)
+	assert.Equal(t, 1, result.Sessions)
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	for _, text := range log.texts {
+		assert.NotContains(t, text, secret)
+	}
+	assert.Contains(t, strings.Join(log.texts, "\n"), "[REDACTED_SECRET]")
 }
 
-// TestManagerRunPassDiscardsEntriesWhenRevisitFindsSecrets grows an already
+// TestManagerRunPassReextractsRedactedEntriesWhenTranscriptGainsSecret grows an already
 // extracted session with secret-bearing content under a restored clean stamp
 // (growSession re-stamps, modeling the interrupted-rescan archive). The full
 // pass revisit must drop the session's generated entries and fail it closed
 // instead of topping it up.
-func TestManagerRunPassDiscardsEntriesWhenRevisitFindsSecrets(t *testing.T) {
+func TestManagerRunPassReextractsRedactedEntriesWhenTranscriptGainsSecret(t *testing.T) {
 	d := newTestArchive(t)
 	ctx := context.Background()
 	server, log := modelServer(t, alwaysEntries(t, "x"))
@@ -2866,19 +2847,16 @@ func TestManagerRunPassDiscardsEntriesWhenRevisitFindsSecrets(t *testing.T) {
 
 	result, err = m.RunPass(ctx, PassOptions{Full: true})
 	require.NoError(t, err)
-	assert.Equal(t, cleanCalls, log.count(),
-		"the grown secret-bearing transcript must not reach the model")
-	assert.Equal(t, 1, result.Failed)
-	assert.Zero(t, result.Entries)
+	assert.Greater(t, log.count(), cleanCalls)
+	assert.Zero(t, result.Failed)
+	assert.Equal(t, 1, result.Sessions)
 
 	entries, err := d.ListRecallEntries(ctx, db.RecallQuery{Limit: 50})
 	require.NoError(t, err)
-	assert.Empty(t, entries,
-		"entries extracted before the secret appeared must be discarded")
-
-	progress, found, err := d.ExtractProgress(ctx, "sess-1", m.Fingerprint())
-	require.NoError(t, err)
-	require.True(t, found)
-	assert.Equal(t, db.ExtractProgressFailed, progress.State)
-	assert.Contains(t, progress.LastError, "secrets scan --backfill")
+	assert.NotEmpty(t, entries)
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	for _, text := range log.texts {
+		assert.NotContains(t, text, secret)
+	}
 }

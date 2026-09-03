@@ -38,6 +38,21 @@ func TestRedactNoMatchReturnsInput(t *testing.T) {
 	assert.Equal(t, in, Redact(in))
 }
 
+func TestRedactOpaqueRemovesEveryCredentialFragment(t *testing.T) {
+	secret := "AKIA7QHWN2DKR4FYPLJM"
+	text := "export AWS_KEY=" + secret + " then continue"
+	got := RedactOpaque(text)
+	assert.Equal(t,
+		"export AWS_KEY=[REDACTED_SECRET] then continue", got)
+	assert.NotContains(t, got, secret[:4])
+	assert.NotContains(t, got, secret[len(secret)-4:])
+}
+
+func TestRedactOpaqueNoMatchReturnsInput(t *testing.T) {
+	in := "ordinary project context"
+	assert.Equal(t, in, RedactOpaque(in))
+}
+
 func TestScanSuppressesCandidateOverlappingDefinite(t *testing.T) {
 	// The basic-auth-url candidate and anthropic-key definite both match
 	// inside this URL; only the definite finding should be returned.
