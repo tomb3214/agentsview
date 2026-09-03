@@ -77,8 +77,7 @@ func seedSessionRows(t *testing.T, d *db.DB, s db.Session, msgs []db.Message) {
 			t.Fatalf("seeding messages for %s: %v", id, err)
 		}
 	}
-	// Extraction requires a current clean secret scan, not just a zero
-	// leak count.
+	// Retain realistic independent scanner metadata; Recall ignores it.
 	if err := d.ReplaceSessionSecretFindings(
 		id, nil, 0, secrets.RulesVersion(),
 	); err != nil {
@@ -98,9 +97,8 @@ func settleSessionWrite() {
 }
 
 // growSession appends messages and settles the session the way a sync pass
-// followed by a full secret rescan would: the row's message count matches
-// the transcript again and the full-scan stamp is restored (the append
-// itself revokes it), which also bumps local_modified_at.
+// does: the row's message count matches the transcript again. Scanner metadata
+// is also restored to retain realistic archive state, but Recall ignores it.
 func growSession(t *testing.T, d *db.DB, id string, msgs []db.Message, startOrdinal int) {
 	t.Helper()
 	for i := range msgs {
@@ -389,7 +387,7 @@ func TestManagerActivatesOverTransientlyIneligibleUnfinishedSession(
 // — while the joined text the model would receive contains the whole key.
 // The BEGIN/END literals are assembled at runtime so this file never
 // carries a pattern resembling a real key block.
-func TestManagerRefusesUnitStraddlingSecret(t *testing.T) {
+func TestManagerProcessesUnitStraddlingCredentialPattern(t *testing.T) {
 	d := newTestArchive(t)
 	server, log := modelServer(t, func(_ string, _ int) (int, string) {
 		return http.StatusOK, completionBody(t, entriesJSON(t, "x"))
@@ -409,21 +407,19 @@ func TestManagerRefusesUnitStraddlingSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunPass: %v", err)
 	}
-	if log.count() != 0 {
-		t.Fatalf("model calls = %d, want 0: a transcript with a secret "+
-			"straddling a unit's message boundary must never reach the "+
-			"model", log.count())
+	if log.count() == 0 {
+		t.Fatal("credential patterns must not gate Recall model calls")
 	}
-	if result.Failed != 1 {
-		t.Fatalf("failed = %d, want 1", result.Failed)
+	if result.Failed != 0 || result.Sessions != 1 {
+		t.Fatalf("result = %+v, want successful extraction", result)
 	}
 	entry, err := d.GetRecallEntry(
 		context.Background(), EntryID(m.Fingerprint(), "sess-1", 1, 0))
 	if err != nil {
 		t.Fatalf("GetRecallEntry: %v", err)
 	}
-	if entry != nil {
-		t.Fatalf("entry staged from a secret-bearing unit: %+v", entry)
+	if entry == nil {
+		t.Fatal("expected Recall entry from eligible human session")
 	}
 }
 
@@ -436,7 +432,7 @@ func TestManagerRefusesUnitStraddlingSecret(t *testing.T) {
 // over all outbound unit texts in transcript order is what catches it. The
 // BEGIN/END literals are assembled at runtime so this file carries no
 // key-shaped pattern.
-func TestManagerRefusesSecretSplitAcrossUnits(t *testing.T) {
+func TestManagerProcessesCredentialPatternSplitAcrossUnits(t *testing.T) {
 	d := newTestArchive(t)
 	server, log := modelServer(t, func(_ string, _ int) (int, string) {
 		return http.StatusOK, completionBody(t, entriesJSON(t, "x"))
@@ -455,12 +451,11 @@ func TestManagerRefusesSecretSplitAcrossUnits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunPass: %v", err)
 	}
-	if log.count() != 0 {
-		t.Fatalf("model calls = %d, want 0: a key split across units must "+
-			"never reach the model", log.count())
+	if log.count() == 0 {
+		t.Fatal("credential patterns must not gate Recall model calls")
 	}
-	if result.Failed != 1 {
-		t.Fatalf("failed = %d, want 1", result.Failed)
+	if result.Failed != 0 || result.Sessions != 1 {
+		t.Fatalf("result = %+v, want successful extraction", result)
 	}
 }
 
@@ -470,7 +465,7 @@ func TestManagerRefusesSecretSplitAcrossUnits(t *testing.T) {
 // needing contiguous characters cannot match), so the gate must also scan a
 // separator-free aggregate. The AWS key halves are separate literals so this
 // file never carries a contiguous key.
-func TestManagerRefusesSecretSplitMidTokenAcrossMessages(t *testing.T) {
+func TestManagerProcessesCredentialPatternSplitMidTokenAcrossMessages(t *testing.T) {
 	d := newTestArchive(t)
 	server, log := modelServer(t, func(_ string, _ int) (int, string) {
 		return http.StatusOK, completionBody(t, entriesJSON(t, "x"))
@@ -487,12 +482,11 @@ func TestManagerRefusesSecretSplitMidTokenAcrossMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunPass: %v", err)
 	}
-	if log.count() != 0 {
-		t.Fatalf("model calls = %d, want 0: a key split mid-token across "+
-			"messages must never reach the model", log.count())
+	if log.count() == 0 {
+		t.Fatal("credential patterns must not gate Recall model calls")
 	}
-	if result.Failed != 1 {
-		t.Fatalf("failed = %d, want 1", result.Failed)
+	if result.Failed != 0 || result.Sessions != 1 {
+		t.Fatalf("result = %+v, want successful extraction", result)
 	}
 }
 
@@ -501,7 +495,7 @@ func TestManagerRefusesSecretSplitMidTokenAcrossMessages(t *testing.T) {
 // halves is dropped from the units the endpoint receives, so scanning the
 // raw rows (system content interposed) would miss a key the model can
 // reconstruct from the two adjacent user units.
-func TestManagerRefusesSecretSplitAcrossSystemMessage(t *testing.T) {
+func TestManagerProcessesCredentialPatternSplitAcrossSystemMessage(t *testing.T) {
 	d := newTestArchive(t)
 	server, log := modelServer(t, func(_ string, _ int) (int, string) {
 		return http.StatusOK, completionBody(t, entriesJSON(t, "x"))
@@ -519,12 +513,11 @@ func TestManagerRefusesSecretSplitAcrossSystemMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunPass: %v", err)
 	}
-	if log.count() != 0 {
-		t.Fatalf("model calls = %d, want 0: a system message between the "+
-			"halves must not hide a key the model reconstructs", log.count())
+	if log.count() == 0 {
+		t.Fatal("credential patterns must not gate Recall model calls")
 	}
-	if result.Failed != 1 {
-		t.Fatalf("failed = %d, want 1", result.Failed)
+	if result.Failed != 0 || result.Sessions != 1 {
+		t.Fatalf("result = %+v, want successful extraction", result)
 	}
 }
 
@@ -532,7 +525,7 @@ func TestManagerRefusesSecretSplitAcrossSystemMessage(t *testing.T) {
 // aggregate trims each message as the segmenter does: boundary whitespace
 // that separates the halves in the raw rows is stripped before the model
 // sees them, so the scan must strip it too.
-func TestManagerRefusesSecretSplitAcrossBoundaryWhitespace(t *testing.T) {
+func TestManagerProcessesCredentialPatternAcrossBoundaryWhitespace(t *testing.T) {
 	d := newTestArchive(t)
 	server, log := modelServer(t, func(_ string, _ int) (int, string) {
 		return http.StatusOK, completionBody(t, entriesJSON(t, "x"))
@@ -549,12 +542,11 @@ func TestManagerRefusesSecretSplitAcrossBoundaryWhitespace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunPass: %v", err)
 	}
-	if log.count() != 0 {
-		t.Fatalf("model calls = %d, want 0: boundary whitespace must not "+
-			"hide a key the model receives contiguously", log.count())
+	if log.count() == 0 {
+		t.Fatal("credential patterns must not gate Recall model calls")
 	}
-	if result.Failed != 1 {
-		t.Fatalf("failed = %d, want 1", result.Failed)
+	if result.Failed != 0 || result.Sessions != 1 {
+		t.Fatalf("result = %+v, want successful extraction", result)
 	}
 }
 
@@ -898,7 +890,7 @@ func TestManagerFullPassReplacesEntriesOfChangedUnits(t *testing.T) {
 	}
 }
 
-func TestManagerSkipsSessionsWithoutCurrentSecretScan(t *testing.T) {
+func TestManagerProcessesSessionsWithoutCurrentSecretScan(t *testing.T) {
 	d := newTestArchive(t)
 	ctx := context.Background()
 	server, log := modelServer(t, alwaysEntries(t, "x"))
@@ -924,17 +916,18 @@ func TestManagerSkipsSessionsWithoutCurrentSecretScan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunPass: %v", err)
 	}
-	if result.Sessions != 0 || log.count() != 0 {
-		t.Fatalf("unscanned session reached the model: %+v, %d calls",
+	if result.Sessions != 1 || log.count() == 0 {
+		t.Fatalf("unscanned session was not processed: %+v, %d calls",
 			result, log.count())
 	}
 
+	before := log.count()
 	_, err = m.RunPass(ctx, PassOptions{SessionID: "sess-unscanned"})
-	if err == nil {
-		t.Fatal("explicit run on an unscanned session must be refused")
+	if err != nil {
+		t.Fatalf("explicit run on an unscanned session failed: %v", err)
 	}
-	if log.count() != 0 {
-		t.Fatal("refusal must happen before any model call")
+	if log.count() != before {
+		t.Fatal("same-digest explicit revisit should reuse completed extraction")
 	}
 }
 
@@ -1098,7 +1091,7 @@ func TestNewManagerValidatesConfig(t *testing.T) {
 	}
 }
 
-func TestManagerRefusesDefiniteOnlyScan(t *testing.T) {
+func TestManagerProcessesDefiniteOnlyScan(t *testing.T) {
 	d := newTestArchive(t)
 	ctx := context.Background()
 	server, log := modelServer(t, alwaysEntries(t, "x"))
@@ -1116,24 +1109,22 @@ func TestManagerRefusesDefiniteOnlyScan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunPass: %v", err)
 	}
-	if result.Sessions != 0 || log.count() != 0 {
-		t.Fatalf("definite-only scanned session reached the model: %+v, "+
+	if result.Sessions != 1 || log.count() == 0 {
+		t.Fatalf("definite-only scanned session was not processed: %+v, "+
 			"%d calls", result, log.count())
 	}
 
+	before := log.count()
 	_, err = m.RunPass(ctx, PassOptions{SessionID: "sess-inline"})
-	if err == nil {
-		t.Fatal("explicit run on a definite-only scanned session must be refused")
+	if err != nil {
+		t.Fatalf("explicit run failed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "--backfill") {
-		t.Fatalf("refusal must point at the full scan: %v", err)
-	}
-	if log.count() != 0 {
-		t.Fatal("refusal must happen before any model call")
+	if log.count() != before {
+		t.Fatal("same-digest explicit revisit should reuse completed extraction")
 	}
 }
 
-func TestManagerRefusesSessionsWithCandidateFindings(t *testing.T) {
+func TestManagerProcessesSessionsWithCandidateFindings(t *testing.T) {
 	d := newTestArchive(t)
 	ctx := context.Background()
 	server, log := modelServer(t, alwaysEntries(t, "x"))
@@ -1159,17 +1150,18 @@ func TestManagerRefusesSessionsWithCandidateFindings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunPass: %v", err)
 	}
-	if result.Sessions != 0 || log.count() != 0 {
-		t.Fatalf("session with a candidate finding reached the model: %+v, "+
+	if result.Sessions != 1 || log.count() == 0 {
+		t.Fatalf("session with a candidate finding was not processed: %+v, "+
 			"%d calls", result, log.count())
 	}
 
+	before := log.count()
 	_, err = m.RunPass(ctx, PassOptions{SessionID: "sess-candidate"})
-	if err == nil {
-		t.Fatal("explicit run on a session with candidate findings must be refused")
+	if err != nil {
+		t.Fatalf("explicit run failed: %v", err)
 	}
-	if log.count() != 0 {
-		t.Fatal("refusal must happen before any model call")
+	if log.count() != before {
+		t.Fatal("same-digest explicit revisit should reuse completed extraction")
 	}
 }
 
@@ -1199,10 +1191,6 @@ func TestSessionSnapshotChanged(t *testing.T) {
 			s.TranscriptRevision = &other
 		}},
 		{"revision cleared", func(s *db.Session) { s.TranscriptRevision = nil }},
-		{"scan version", func(s *db.Session) {
-			s.SecretsRulesVersion = secrets.DefiniteRulesVersion()
-		}},
-		{"leak count", func(s *db.Session) { s.SecretLeakCount = 1 }},
 		{"ended at", func(s *db.Session) {
 			other := "2026-01-01T00:00:01.000Z"
 			s.EndedAt = &other
@@ -1736,7 +1724,7 @@ func TestManagerDiscardsSessionTrashedMidExtraction(t *testing.T) {
 	}
 }
 
-func TestManagerStopsWhenSecretFindingAppearsMidExtraction(t *testing.T) {
+func TestManagerContinuesWhenCredentialFindingAppearsMidExtraction(t *testing.T) {
 	d := newTestArchive(t)
 	ctx := context.Background()
 	server, log := modelServer(t, func(_ string, call int) (int, string) {
@@ -1767,23 +1755,24 @@ func TestManagerStopsWhenSecretFindingAppearsMidExtraction(t *testing.T) {
 		t.Fatalf("RunPass: %v", err)
 	}
 	if log.count() != 2 {
-		t.Fatalf("model calls = %d, want 2: units after the finding must "+
-			"not reach the model", log.count())
+		t.Fatalf("model calls = %d, want the concurrent metadata write to stop the current bracket", log.count())
 	}
-	if result.Failed != 1 {
-		t.Fatalf("result = %+v, want the session recorded as a failure "+
-			"with discarded output", result)
+	if result.Failed != 0 {
+		t.Fatalf("result = %+v, credential finding must not fail extraction", result)
 	}
-	for _, status := range []string{"", "archived"} {
-		entries, err := d.ListRecallEntries(ctx,
-			db.RecallQuery{Status: status, Limit: 50})
-		if err != nil {
-			t.Fatalf("ListRecallEntries(%q): %v", status, err)
-		}
-		if len(entries) != 0 {
-			t.Fatalf("%d %q entries persisted after a secret finding "+
-				"appeared mid-extraction; want none", len(entries), status)
-		}
+	result, err = m.RunPass(ctx, PassOptions{Full: true})
+	if err != nil {
+		t.Fatalf("RunPass retry: %v", err)
+	}
+	if result.Failed != 0 || result.Sessions != 1 || log.count() != 5 {
+		t.Fatalf("retry result = %+v calls=%d, want completed extraction", result, log.count())
+	}
+	entries, err := d.ListRecallEntries(ctx, db.RecallQuery{Limit: 50})
+	if err != nil {
+		t.Fatalf("ListRecallEntries: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected Recall entries despite scanner finding")
 	}
 }
 
@@ -2816,7 +2805,7 @@ func TestManagerRevisitRestoresRevokedProvenance(t *testing.T) {
 // clean stamp over content the scan never saw (an incremental append whose
 // deferred rescan crashed before it landed). The stamp is only a claim; the
 // boundary must re-check the content it actually sends.
-func TestManagerRunPassRefusesTranscriptMatchingSecretRules(t *testing.T) {
+func TestManagerRunPassProcessesTranscriptMatchingCredentialRules(t *testing.T) {
 	d := newTestArchive(t)
 	ctx := context.Background()
 	server, log := modelServer(t, alwaysEntries(t, "x"))
@@ -2829,17 +2818,16 @@ func TestManagerRunPassRefusesTranscriptMatchingSecretRules(t *testing.T) {
 
 	result, err := m.RunPass(ctx, PassOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, 0, log.count(),
-		"secret-bearing transcript must never reach the model")
-	assert.Equal(t, 1, result.Failed)
-	assert.Zero(t, result.Sessions)
-	assert.Zero(t, result.Entries)
+	assert.Positive(t, log.count())
+	assert.Zero(t, result.Failed)
+	assert.Equal(t, 1, result.Sessions)
+	assert.Positive(t, result.Entries)
 
 	progress, found, err := d.ExtractProgress(ctx, "sess-1", m.Fingerprint())
 	require.NoError(t, err)
 	require.True(t, found)
-	assert.Equal(t, db.ExtractProgressFailed, progress.State)
-	assert.Contains(t, progress.LastError, "secrets scan --backfill")
+	assert.Equal(t, db.ExtractProgressDone, progress.State)
+	assert.Empty(t, progress.LastError)
 }
 
 // TestManagerRunPassDiscardsEntriesWhenRevisitFindsSecrets grows an already
@@ -2847,7 +2835,7 @@ func TestManagerRunPassRefusesTranscriptMatchingSecretRules(t *testing.T) {
 // (growSession re-stamps, modeling the interrupted-rescan archive). The full
 // pass revisit must drop the session's generated entries and fail it closed
 // instead of topping it up.
-func TestManagerRunPassDiscardsEntriesWhenRevisitFindsSecrets(t *testing.T) {
+func TestManagerRunPassRetainsEntriesWhenRevisitFindsCredentialPattern(t *testing.T) {
 	d := newTestArchive(t)
 	ctx := context.Background()
 	server, log := modelServer(t, alwaysEntries(t, "x"))
@@ -2866,19 +2854,17 @@ func TestManagerRunPassDiscardsEntriesWhenRevisitFindsSecrets(t *testing.T) {
 
 	result, err = m.RunPass(ctx, PassOptions{Full: true})
 	require.NoError(t, err)
-	assert.Equal(t, cleanCalls, log.count(),
-		"the grown secret-bearing transcript must not reach the model")
-	assert.Equal(t, 1, result.Failed)
-	assert.Zero(t, result.Entries)
+	assert.Greater(t, log.count(), cleanCalls)
+	assert.Zero(t, result.Failed)
+	assert.Positive(t, result.Entries)
 
 	entries, err := d.ListRecallEntries(ctx, db.RecallQuery{Limit: 50})
 	require.NoError(t, err)
-	assert.Empty(t, entries,
-		"entries extracted before the secret appeared must be discarded")
+	assert.NotEmpty(t, entries)
 
 	progress, found, err := d.ExtractProgress(ctx, "sess-1", m.Fingerprint())
 	require.NoError(t, err)
 	require.True(t, found)
-	assert.Equal(t, db.ExtractProgressFailed, progress.State)
-	assert.Contains(t, progress.LastError, "secrets scan --backfill")
+	assert.Equal(t, db.ExtractProgressDone, progress.State)
+	assert.Empty(t, progress.LastError)
 }

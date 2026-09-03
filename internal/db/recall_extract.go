@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -37,7 +36,7 @@ var ErrStaleExtractProgress = errors.New("extract progress is stale")
 // ErrExtractSessionDrifted reports that a guarded commit found the session
 // changed or no longer eligible: the transcript state the caller derived its
 // unit from is not the state on disk, or the session was trashed, flagged
-// automated, or gained secret findings. Nothing was persisted.
+// automated. Nothing was persisted.
 var ErrExtractSessionDrifted = errors.New(
 	"extract session drifted during commit")
 
@@ -191,24 +190,17 @@ func (db *DB) ExtractGenerations(
 // retires whichever generation was previously active, in one transaction so
 // two generations can never be active simultaneously. The caller's coverage
 // checks are advisory: sessions can slip back to pending, gain writes past
-// their coverage stamp, lose their scan stamp, or become eligible without
+// their coverage stamp or become eligible without
 // ever being extracted between those checks and this write, so the same
-// gates are re-verified inside the transaction — against scanVersions as
-// the set of current secret-scan rules and quietCutoff as the eligibility
-// cutoff — and any mismatch aborts with ErrExtractActivationBlocked instead
+// gates are re-verified inside the transaction against quietCutoff as the
+// eligibility cutoff, and any mismatch aborts with ErrExtractActivationBlocked instead
 // of retiring the served corpus around it.
 func (db *DB) ActivateExtractGeneration(
 	ctx context.Context, fingerprint string,
-	scanVersions []string, quietCutoff time.Time,
+	_ []string, quietCutoff time.Time,
 ) error {
 	if err := db.requireWritable(); err != nil {
 		return err
-	}
-	if len(scanVersions) == 0 {
-		return fmt.Errorf(
-			"activating generation %s requires the current secret-scan "+
-				"versions: without them stale coverage would count as "+
-				"current", fingerprint)
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -222,7 +214,7 @@ func (db *DB) ActivateExtractGeneration(
 	defer func() { _ = tx.Rollback() }()
 
 	if err := verifyExtractActivationCoverageTx(
-		ctx, tx, fingerprint, scanVersions, quietCutoff,
+		ctx, tx, fingerprint, quietCutoff,
 	); err != nil {
 		return err
 	}
@@ -269,31 +261,20 @@ func (db *DB) ActivateExtractGeneration(
 	// Promotion re-verifies full eligibility inside the activation
 	// transaction, and clears — not merely skips — what fails it. Any
 	// session no longer fully eligible (trashed, flagged automated,
-	// carrying findings, reopened, back inside the quiet period, awaiting
-	// rescan, or gone entirely) has its staged output and progress rows
+	// reopened, back inside the quiet period, or gone entirely) has its staged
+	// output and progress rows
 	// deleted: an archived entry under a surviving progress row would
 	// never be promoted or rediscovered once the generation is active —
 	// deferring hard-ineligible rows to the retraction pass loses the
 	// race against a restore that arrives first — while a cleared session
 	// is rediscovered and re-extracted from scratch when it settles or
 	// returns.
-	versionMarks := strings.TrimSuffix(
-		strings.Repeat("?,", len(scanVersions)), ",")
-	// Concatenation, not a second Sprintf pass: the rendered eligibility
-	// SQL contains literal % characters (strftime), which a re-format
-	// would mangle into %!Y(MISSING)-style garbage.
 	staleSessionFor := func(idColumn string) string {
 		return `NOT EXISTS (SELECT 1 FROM sessions s
 			WHERE s.id = ` + idColumn + `
-			  AND ` +
-			fmt.Sprintf(extractEligibleSessionSQL, versionMarks) + `)`
+			  AND ` + extractEligibleSessionSQL + `)`
 	}
-	staleArgs := make([]any, 0, len(scanVersions)+2)
-	staleArgs = append(staleArgs, fingerprint)
-	for _, version := range scanVersions {
-		staleArgs = append(staleArgs, version)
-	}
-	staleArgs = append(staleArgs, quietCutoff.UTC().Format(extractTimeLayout))
+	staleArgs := []any{fingerprint, quietCutoff.UTC().Format(extractTimeLayout)}
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM recall_entries
 		WHERE review_state = 'unreviewed_auto' AND status = 'archived'
@@ -358,7 +339,7 @@ func (db *DB) ActivateExtractGeneration(
 // transaction, that the generation's coverage still supports serving: no
 // fully eligible session is pending or partial, no completed session —
 // still extraction-eligible — has transcript writes past its coverage
-// stamp or a scan stamp outside the current rules versions, and no eligible session
+// stamp, and no eligible session
 // lacks a progress row entirely (a single-session run, or a session ending
 // after the caller's checks, leaves uncovered work that no progress-based
 // gate can see). Failed sessions do not block (they retry and top the
@@ -370,32 +351,26 @@ func (db *DB) ActivateExtractGeneration(
 // pass removes them.
 func verifyExtractActivationCoverageTx(
 	ctx context.Context, tx *sql.Tx, fingerprint string,
-	scanVersions []string, quietCutoff time.Time,
+	quietCutoff time.Time,
 ) error {
-	versionMarks := strings.TrimSuffix(
-		strings.Repeat("?,", len(scanVersions)), ",")
 	// Full eligibility, not merely "not hard-ineligible": a pending or
-	// partial row whose session is in transient flux (reopened, scan
-	// stamp lost) is skipped by candidate selection and left alone by
+	// partial row whose session is in transient flux (reopened) is skipped by
+	// candidate selection and left alone by
 	// reconciliation, so no pass can ever finish it — counting it here
 	// would block activation until the session happens to settle,
 	// possibly forever. The cleanup below deletes such rows with their
 	// staged output, and rediscovery re-extracts once the session
 	// settles.
-	buildingArgs := make([]any, 0, len(scanVersions)+4)
-	buildingArgs = append(buildingArgs,
-		fingerprint, ExtractProgressPending, ExtractProgressPartial)
-	for _, version := range scanVersions {
-		buildingArgs = append(buildingArgs, version)
+	buildingArgs := []any{
+		fingerprint, ExtractProgressPending, ExtractProgressPartial,
 	}
-	buildingArgs = append(buildingArgs,
-		quietCutoff.UTC().Format(extractTimeLayout))
+	buildingArgs = append(buildingArgs, quietCutoff.UTC().Format(extractTimeLayout))
 	var building int
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM recall_extract_progress p
 		JOIN sessions s ON s.id = p.session_id
 		WHERE p.generation_fingerprint = ? AND p.state IN (?, ?)
-		  AND `+fmt.Sprintf(extractEligibleSessionSQL, versionMarks),
+		  AND `+extractEligibleSessionSQL,
 		buildingArgs...,
 	).Scan(&building); err != nil {
 		return fmt.Errorf("counting unfinished coverage: %w", err)
@@ -405,29 +380,18 @@ func verifyExtractActivationCoverageTx(
 			"generation %s has %d sessions still being extracted: %w",
 			fingerprint, building, ErrExtractActivationBlocked)
 	}
-	args := make([]any, 0, len(scanVersions)+2)
-	args = append(args, fingerprint, ExtractProgressDone)
-	for _, version := range scanVersions {
-		args = append(args, version)
-	}
+	args := []any{fingerprint, ExtractProgressDone}
 	// The stamp comparison mirrors the done-revisit gate (>= keeps the
 	// same-millisecond write on the safe side; the NULL pair settles
-	// legacy rows once), and the scan-stamp arm catches the case the
-	// backlog probe cannot see: a transcript write clears the stamp, which
-	// removes the session from the eligible candidate set entirely while
-	// its staged entries would still promote.
+	// legacy rows once).
 	var stale int
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM recall_extract_progress p
 		JOIN sessions s ON s.id = p.session_id
 		WHERE p.generation_fingerprint = ? AND p.state = ?
 		  AND NOT (`+extractSessionIneligibleSQL+`)
-		  AND (
-			((s.local_modified_at IS NULL AND p.content_stamped_at = '')
-				OR s.local_modified_at >= p.content_stamped_at)
-			OR s.secrets_rules_version IS NULL
-			OR s.secrets_rules_version NOT IN (`+versionMarks+`)
-		  )`,
+		  AND ((s.local_modified_at IS NULL AND p.content_stamped_at = '')
+			OR s.local_modified_at >= p.content_stamped_at)`,
 		args...,
 	).Scan(&stale); err != nil {
 		return fmt.Errorf("counting stale coverage: %w", err)
@@ -437,12 +401,8 @@ func verifyExtractActivationCoverageTx(
 			"generation %s has %d completed sessions whose coverage went "+
 				"stale: %w", fingerprint, stale, ErrExtractActivationBlocked)
 	}
-	failedArgs := make([]any, 0, len(scanVersions)+3)
-	failedArgs = append(failedArgs, fingerprint, ExtractProgressFailed)
-	for _, version := range scanVersions {
-		failedArgs = append(failedArgs, version)
-	}
-	failedArgs = append(failedArgs, quietCutoff.UTC().Format(extractTimeLayout))
+	failedArgs := []any{fingerprint, ExtractProgressFailed,
+		quietCutoff.UTC().Format(extractTimeLayout)}
 	// Failed rows do not block in general — they retry and top the corpus
 	// up later — but a failed partial row keeps its staged entries behind
 	// the failure backoff, and a session write past its stamp (content, or
@@ -456,7 +416,7 @@ func verifyExtractActivationCoverageTx(
 		SELECT COUNT(*) FROM recall_extract_progress p
 		JOIN sessions s ON s.id = p.session_id
 		WHERE p.generation_fingerprint = ? AND p.state = ?
-		  AND `+fmt.Sprintf(extractEligibleSessionSQL, versionMarks)+`
+		  AND `+extractEligibleSessionSQL+`
 		  AND ((s.local_modified_at IS NULL AND p.content_stamped_at = '')
 			OR s.local_modified_at >= p.content_stamped_at)
 		  AND EXISTS (
@@ -475,17 +435,12 @@ func verifyExtractActivationCoverageTx(
 				"went stale: %w",
 			fingerprint, staleFailed, ErrExtractActivationBlocked)
 	}
-	eligibleArgs := make([]any, 0, len(scanVersions)+2)
-	for _, version := range scanVersions {
-		eligibleArgs = append(eligibleArgs, version)
-	}
-	eligibleArgs = append(eligibleArgs,
-		quietCutoff.UTC().Format(extractTimeLayout), fingerprint)
+	eligibleArgs := []any{quietCutoff.UTC().Format(extractTimeLayout), fingerprint}
 	var uncovered bool
 	if err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM sessions s
-			WHERE `+fmt.Sprintf(extractEligibleSessionSQL, versionMarks)+`
+			WHERE `+extractEligibleSessionSQL+`
 			  AND NOT EXISTS (
 				SELECT 1 FROM recall_extract_progress p
 				WHERE p.session_id = s.id
@@ -1146,9 +1101,9 @@ const extractTimeLayout = "2006-01-02T15:04:05.000Z"
 // finished sessions settle before being read. FailedRetryCutoff gates failed
 // rows: only failures last touched at or before it are retried, and the zero
 // value retries nothing — a caller that forgets to set it can never cause a
-// retry storm. ScanVersions are the secret-scan rules versions considered
-// current; sessions whose last scan is missing or stale are excluded, and an
-// empty list is an error rather than "trust everything". IncludeDone
+// retry storm. ScanVersions is retained for API compatibility but is ignored:
+// Recall eligibility is intentionally independent from credential scanning.
+// IncludeDone
 // revisits completed sessions so their content digests can be rechecked, but
 // only those written to since extraction finished.
 type ExtractCandidateQuery struct {
@@ -1173,21 +1128,16 @@ type ExtractCandidateQuery struct {
 	Limit            int
 }
 
-// extractEligibleSessionSQL is the extraction privacy boundary over one
+// extractEligibleSessionSQL is the extraction eligibility boundary over one
 // sessions row aliased s. Every arm of the candidates query applies it, so
 // the discovery and progress paths can never disagree about eligibility. It
-// consumes len(ScanVersions)+1 args: the versions, then the quiet cutoff.
+// It consumes one argument: the quiet cutoff.
 const extractEligibleSessionSQL = `s.deleted_at IS NULL
 	AND s.is_automated = 0
-	AND s.secret_leak_count = 0
-	AND s.secrets_rules_version IN (%s)
-	AND NOT EXISTS (
-		SELECT 1 FROM secret_findings sf WHERE sf.session_id = s.id
-	)
 	AND s.message_count > 0
 	AND s.ended_at IS NOT NULL
 	AND s.ended_at != ''
-	AND strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ', s.ended_at) <= ?`
+	AND strftime('%Y-%m-%dT%H:%M:%fZ', s.ended_at) <= ?`
 
 // extractCandidateSQL builds the candidates query as a union of indexed
 // arms: discovery walks sessions by local_modified_at (bounded by
@@ -1203,24 +1153,12 @@ func extractCandidateSQL(q ExtractCandidateQuery) (string, []any, error) {
 		return "", nil, fmt.Errorf(
 			"extract candidate query requires a fingerprint")
 	}
-	if len(q.ScanVersions) == 0 {
-		return "", nil, fmt.Errorf(
-			"extract candidate query requires the current secret-scan " +
-				"versions: without them unscanned sessions would count as clean")
-	}
 	limit := q.Limit
 	if limit <= 0 {
 		limit = -1
 	}
-	versionMarks := strings.Repeat("?,", len(q.ScanVersions))
-	versionMarks = versionMarks[:len(versionMarks)-1]
-	eligible := fmt.Sprintf(extractEligibleSessionSQL, versionMarks)
-	eligibleArgs := make([]any, 0, len(q.ScanVersions)+1)
-	for _, version := range q.ScanVersions {
-		eligibleArgs = append(eligibleArgs, version)
-	}
-	eligibleArgs = append(eligibleArgs,
-		q.QuietCutoff.UTC().Format(extractTimeLayout))
+	eligible := extractEligibleSessionSQL
+	eligibleArgs := []any{q.QuietCutoff.UTC().Format(extractTimeLayout)}
 
 	var sb strings.Builder
 	var args []any
@@ -1314,9 +1252,9 @@ func extractCandidateSQL(q ExtractCandidateQuery) (string, []any, error) {
 }
 
 // ExtractCandidates returns eligible session ids, oldest ended first.
-// Eligibility encodes the extraction privacy boundary and is deliberately
-// not configurable: automated sessions, trashed sessions, and sessions with
-// any secret findings never reach the extraction model.
+// Eligibility is deliberately not configurable: automated, trashed, empty,
+// or still-running sessions never reach the extraction model. Credential scan
+// state does not gate Recall.
 func (db *DB) ExtractCandidates(
 	ctx context.Context, q ExtractCandidateQuery,
 ) ([]string, error) {
@@ -1415,7 +1353,7 @@ type ExtractUnitCommit struct {
 	Fingerprint  string
 	Digest       string
 	Cursor       int
-	ScanVersions []string
+	ScanVersions []string // Deprecated: retained for API compatibility.
 	// Snapshot guard: the session-row state the unit was derived from.
 	MessageCount       int
 	TranscriptRevision *string
@@ -1424,8 +1362,8 @@ type ExtractUnitCommit struct {
 	Entries            []RecallEntry
 }
 
-// CommitExtractedUnit atomically re-verifies the session (eligibility,
-// absence of secret findings, and an unchanged snapshot), binds each
+// CommitExtractedUnit atomically re-verifies the session eligibility and
+// unchanged snapshot, binds each
 // entry's evidence to the host transcript (content digest and stable
 // endpoint UUIDs — without them the evidence reconciler revokes provenance
 // on the first transcript write), inserts the entries, and advances the
@@ -1436,11 +1374,6 @@ func (db *DB) CommitExtractedUnit(
 ) (int, error) {
 	if err := db.requireWritable(); err != nil {
 		return 0, err
-	}
-	if len(u.ScanVersions) == 0 {
-		return 0, fmt.Errorf(
-			"committing unit for session %s requires the current "+
-				"secret-scan versions", u.SessionID)
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -1454,7 +1387,6 @@ func (db *DB) CommitExtractedUnit(
 	defer func() { _ = tx.Rollback() }()
 	if err := verifyExtractSessionGuardTx(ctx, tx, ExtractSessionGuard{
 		SessionID:          u.SessionID,
-		ScanVersions:       u.ScanVersions,
 		MessageCount:       u.MessageCount,
 		TranscriptRevision: u.TranscriptRevision,
 		LocalModifiedAt:    u.LocalModifiedAt,
@@ -1513,7 +1445,6 @@ func (db *DB) CommitExtractedUnit(
 // moved or the session is no longer eligible.
 type ExtractSessionGuard struct {
 	SessionID          string
-	ScanVersions       []string
 	MessageCount       int
 	TranscriptRevision *string
 	LocalModifiedAt    *string
@@ -1526,16 +1457,14 @@ func verifyExtractSessionGuardTx(
 	var (
 		deletedAt, revision, localModified, endedAt sql.NullString
 		isAutomated                                 bool
-		leakCount, messageCount                     int
-		rulesVersion                                string
+		messageCount                                int
 	)
 	err := tx.QueryRowContext(ctx, `
-		SELECT deleted_at, is_automated, secret_leak_count,
-		       secrets_rules_version, message_count,
+		SELECT deleted_at, is_automated, message_count,
 		       transcript_revision, local_modified_at, ended_at
 		FROM sessions WHERE id = ?`, u.SessionID,
-	).Scan(&deletedAt, &isAutomated, &leakCount, &rulesVersion,
-		&messageCount, &revision, &localModified, &endedAt)
+	).Scan(&deletedAt, &isAutomated, &messageCount,
+		&revision, &localModified, &endedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return extractDriftErrorf("session %s vanished", u.SessionID)
 	}
@@ -1543,19 +1472,12 @@ func verifyExtractSessionGuardTx(
 		return fmt.Errorf(
 			"reading session %s for unit commit: %w", u.SessionID, err)
 	}
-	versionOK := slices.Contains(u.ScanVersions, rulesVersion)
 	switch {
 	case deletedAt.Valid:
 		return extractDriftErrorf("session %s was trashed", u.SessionID)
 	case isAutomated:
 		return extractDriftErrorf(
 			"session %s was flagged automated", u.SessionID)
-	case leakCount > 0:
-		return extractDriftErrorf(
-			"session %s gained %d secret leaks", u.SessionID, leakCount)
-	case !versionOK:
-		return extractDriftErrorf(
-			"session %s lost its current secret scan", u.SessionID)
 	case messageCount != u.MessageCount:
 		return extractDriftErrorf(
 			"session %s message count moved from %d to %d",
@@ -1573,18 +1495,6 @@ func verifyExtractSessionGuardTx(
 		return extractDriftErrorf(
 			"session %s was reopened or re-dated during distillation",
 			u.SessionID)
-	}
-	var findings int
-	if err := tx.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM secret_findings WHERE session_id = ?",
-		u.SessionID,
-	).Scan(&findings); err != nil {
-		return fmt.Errorf(
-			"counting findings for session %s: %w", u.SessionID, err)
-	}
-	if findings > 0 {
-		return extractDriftErrorf(
-			"session %s gained %d secret findings", u.SessionID, findings)
 	}
 	return nil
 }
@@ -1652,15 +1562,10 @@ func bindExtractedEvidenceTx(
 }
 
 // extractSessionIneligibleSQL matches sessions (aliased s) whose extraction
-// output must be retracted: trashed, flagged automated, or carrying secret
-// findings or leaks. Stale or missing scan versions deliberately do not
-// qualify — they are transient (every transcript write clears the stamp
-// until rescan) and retracting on them would rebuild the corpus on every
-// sync.
+// output must be retracted: trashed or flagged automated. Credential scanner
+// state is intentionally independent from Recall eligibility.
 const extractSessionIneligibleSQL = `s.deleted_at IS NOT NULL
-	OR s.is_automated != 0
-	OR s.secret_leak_count > 0
-	OR EXISTS (SELECT 1 FROM secret_findings sf WHERE sf.session_id = s.id)`
+	OR s.is_automated != 0`
 
 // ReconcileIneligibleExtractSessions removes the generated corpus of
 // sessions that lost extraction eligibility after extraction. It is
@@ -1954,7 +1859,7 @@ type ExtractCoverageRefresh struct {
 	Fingerprint  string
 	Digest       string
 	StampedAt    time.Time
-	ScanVersions []string
+	ScanVersions []string // Deprecated: retained for API compatibility.
 	Session      *Session
 }
 
@@ -1978,11 +1883,6 @@ func (db *DB) RefreshExtractedSessionCoverage(
 			"refreshing coverage for generation %s requires the bracketed "+
 				"session snapshot", u.Fingerprint)
 	}
-	if len(u.ScanVersions) == 0 {
-		return zero, fmt.Errorf(
-			"refreshing coverage for session %s requires the current "+
-				"secret-scan versions", u.Session.ID)
-	}
 	if u.StampedAt.IsZero() {
 		return zero, fmt.Errorf(
 			"refreshing coverage for session %s requires the "+
@@ -2000,7 +1900,6 @@ func (db *DB) RefreshExtractedSessionCoverage(
 	defer func() { _ = tx.Rollback() }()
 	if err := verifyExtractSessionGuardTx(ctx, tx, ExtractSessionGuard{
 		SessionID:          u.Session.ID,
-		ScanVersions:       u.ScanVersions,
 		MessageCount:       u.Session.MessageCount,
 		TranscriptRevision: u.Session.TranscriptRevision,
 		LocalModifiedAt:    u.Session.LocalModifiedAt,

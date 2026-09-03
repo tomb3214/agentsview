@@ -14,7 +14,6 @@ import (
 
 	"go.kenn.io/agentsview/internal/db"
 	recall "go.kenn.io/agentsview/internal/recall"
-	"go.kenn.io/agentsview/internal/secrets"
 )
 
 const (
@@ -224,7 +223,7 @@ func (m *Manager) runPassLocked(
 		return result, err
 	}
 	// Every scheduled pass reconciles eligibility loss before any model
-	// work: sessions since trashed, flagged automated, or carrying secret
+	// work: sessions since trashed or flagged automated
 	// findings get their generated entries deleted (across all registered
 	// generations — a retired generation keeps serving until the next
 	// activation) and their progress rows removed, so an excluded
@@ -355,9 +354,6 @@ func (m *Manager) passSessions(
 		if err := extractableSession(opts.SessionID, session); err != nil {
 			return nil, err
 		}
-		if err := m.refuseSecretFindings(ctx, opts.SessionID); err != nil {
-			return nil, err
-		}
 		return []string{opts.SessionID}, nil
 	}
 	now := time.Now()
@@ -371,7 +367,6 @@ func (m *Manager) passSessions(
 		Fingerprint:       m.fingerprint,
 		QuietCutoff:       now.Add(-m.cfg.QuietPeriod),
 		FailedRetryCutoff: now.Add(-m.cfg.FailureBackoff),
-		ScanVersions:      []string{secrets.RulesVersion()},
 		IncludeDone:       opts.Full,
 		ChangedSince:      m.watermark,
 		Limit:             opts.Limit,
@@ -383,8 +378,8 @@ func (m *Manager) passSessions(
 }
 
 // ineligibleSessionError marks a failure of the pre-extraction eligibility
-// phase: the session row is missing, a privacy predicate refuses it, or it
-// has recorded secret findings. Candidate selection only returns eligible
+// phase: the session row is missing or an eligibility predicate refuses it.
+// Candidate selection only returns eligible
 // sessions, so reaching this from a scheduled pass means the session was
 // excluded concurrently — drift the pass skips, matching the later bracket
 // checks — while an explicit run surfaces the message unchanged.
@@ -392,26 +387,6 @@ type ineligibleSessionError struct{ err error }
 
 func (e *ineligibleSessionError) Error() string { return e.err.Error() }
 func (e *ineligibleSessionError) Unwrap() error { return e.err }
-
-// refuseSecretFindings excludes sessions with recorded secret findings of any
-// confidence. The leak count only counts definite findings; a candidate
-// finding (a JWT, a high-entropy blob) is exactly the material that must not
-// reach the model either.
-func (m *Manager) refuseSecretFindings(
-	ctx context.Context, sessionID string,
-) error {
-	findings, err := m.cfg.DB.SessionSecretFindings(ctx, sessionID)
-	if err != nil {
-		return err
-	}
-	if len(findings) > 0 {
-		return &ineligibleSessionError{err: fmt.Errorf(
-			"session %s has %d recorded secret findings and is excluded "+
-				"from extraction", sessionID, len(findings),
-		)}
-	}
-	return nil
-}
 
 // settledPastQuietPeriod refuses a session whose ended_at falls inside
 // the quiet period as of now. An unparseable ended_at fails closed: a
@@ -435,7 +410,7 @@ func (m *Manager) settledPastQuietPeriod(
 	return nil
 }
 
-// extractableSession enforces the extraction privacy boundary for explicit
+// extractableSession enforces the extraction boundary for explicit
 // single-session runs. The scan path enforces the same predicates in SQL;
 // keeping both in lockstep means no path can feed an excluded session to
 // the model. Callers must have checked s for nil already.
@@ -447,31 +422,12 @@ func extractableSession(id string, s *db.Session) error {
 		return fmt.Errorf(
 			"session %s is automated and excluded from extraction", id,
 		)
-	case s.SecretLeakCount > 0:
-		return fmt.Errorf(
-			"session %s has %d secret findings and is excluded from "+
-				"extraction", id, s.SecretLeakCount,
-		)
-	case !currentScanVersion(s.SecretsRulesVersion):
-		return fmt.Errorf(
-			"session %s has no secret scan under the current rules; run "+
-				"'agentsview secrets scan --backfill' first", id,
-		)
 	case s.MessageCount == 0:
 		return fmt.Errorf("session %s has no messages", id)
 	case s.EndedAt == nil || *s.EndedAt == "":
 		return fmt.Errorf("session %s has not ended", id)
 	}
 	return nil
-}
-
-// currentScanVersion reports whether version is the current *full* secret-scan
-// rules version. The definite-only inline sync scan does not qualify: it never
-// looks for candidate-confidence secrets, so a session it cleared may still
-// carry them. An unscanned session ("") never qualifies either: the privacy
-// boundary fails closed.
-func currentScanVersion(version string) bool {
-	return version == secrets.RulesVersion()
 }
 
 // sessionSnapshotChanged reports whether two reads of a session row describe
@@ -483,8 +439,6 @@ func currentScanVersion(version string) bool {
 func sessionSnapshotChanged(before, after *db.Session) bool {
 	return before.MessageCount != after.MessageCount ||
 		!stringPtrEqual(before.TranscriptRevision, after.TranscriptRevision) ||
-		before.SecretsRulesVersion != after.SecretsRulesVersion ||
-		before.SecretLeakCount != after.SecretLeakCount ||
 		!stringPtrEqual(before.EndedAt, after.EndedAt) ||
 		!stringPtrEqual(before.LocalModifiedAt, after.LocalModifiedAt)
 }
@@ -555,9 +509,6 @@ func (m *Manager) extractSession(
 			return outcome, &ineligibleSessionError{err: err}
 		}
 	}
-	if err := m.refuseSecretFindings(ctx, sessionID); err != nil {
-		return outcome, err
-	}
 	rows, err := m.cfg.DB.GetAllMessages(ctx, sessionID)
 	if err != nil {
 		return outcome, err
@@ -585,13 +536,6 @@ func (m *Manager) extractSession(
 	// failure, because a silent skip would let the discovery watermarks
 	// advance past the session's writes and exclude it forever.
 	countMismatch := len(rows) != session.MessageCount
-	// The stamp the eligibility check trusted is a claim recorded by a past
-	// write, and archives written by older binaries can carry a
-	// current-looking clean stamp over content the scan never saw (an
-	// incremental append whose deferred rescan crashed before it landed).
-	// Re-scanning the content this function is about to send makes the
-	// boundary independent of that history.
-	secretMatches := transcriptSecretMatches(rows)
 	messages := make([]Message, 0, len(rows))
 	for _, row := range rows {
 		messages = append(messages, Message{
@@ -601,16 +545,6 @@ func (m *Manager) extractSession(
 			IsSystem: row.IsSystem,
 		})
 	}
-	// Per-message scanning misses a secret whose structure spans messages:
-	// a PEM block split across adjacent messages (joined inside one unit) or
-	// across separate units the endpoint receives and can correlate. Scan
-	// the aggregate of exactly the model-visible content — the same rows the
-	// segmenter keeps (system and unsupported roles dropped, each trimmed) —
-	// so an intervening system message or boundary whitespace cannot break a
-	// token in the scan that the endpoint still receives contiguously. Raw
-	// contents, not formatted unit texts, so interposed formatting cannot
-	// push a straddling key under the scanner's payload-purity gate.
-	secretMatches += aggregateModelSecretMatches(messages)
 	units := m.cfg.Segmenter.Units(messages)
 	digest := unitsDigest(units)
 	// A digest change means previously extracted units may have different
@@ -624,12 +558,12 @@ func (m *Manager) extractSession(
 	if err != nil {
 		return outcome, err
 	}
-	if secretMatches > 0 || countMismatch {
+	if countMismatch {
 		// The failure transition must own any stamp movement. Writing the
 		// opening upsert first would advance a same-digest done row's
 		// coverage stamp in its own committed transaction; a crash or
 		// cancellation before the reopen below then leaves invalid
-		// coverage — possibly from a secret-bearing transcript — stamped
+		// coverage stamped
 		// current, unselectable by the done-revisit predicate and
 		// eligible for activation. A row already carrying this digest
 		// needs no upsert at all; a missing or digest-changed row is
@@ -651,26 +585,6 @@ func (m *Manager) extractSession(
 				return outcome, err
 			}
 			cursor = created.UnitCursor
-		}
-		if secretMatches > 0 {
-			// Fail closed: entries distilled from this transcript are
-			// suspect, so they are dropped with the row reopened behind
-			// the failure backoff. Recording findings stays the scanner's
-			// job — a rescan either lands the findings (excluding the
-			// session from discovery outright) or re-stamps a genuinely
-			// clean transcript, and either way the retry settles.
-			if derr := m.discardSessionOutput(
-				ctx, sessionID, digest, cursor,
-				fmt.Sprintf(
-					"transcript matches %d secret rule pattern(s) despite "+
-						"a current scan stamp; run 'agentsview secrets "+
-						"scan --backfill'", secretMatches,
-				),
-			); derr != nil {
-				return outcome, derr
-			}
-			outcome.failed = true
-			return outcome, nil
 		}
 		// A same-digest upsert preserves done and settles the stamp,
 		// which would claim the inconsistent state as covered forever.
@@ -709,11 +623,10 @@ func (m *Manager) extractSession(
 		// rebound to it, marked verified, and stamped covered.
 		progress, err = m.cfg.DB.RefreshExtractedSessionCoverage(
 			ctx, db.ExtractCoverageRefresh{
-				Fingerprint:  m.fingerprint,
-				Digest:       digest,
-				StampedAt:    readCutoff,
-				ScanVersions: []string{secrets.RulesVersion()},
-				Session:      session,
+				Fingerprint: m.fingerprint,
+				Digest:      digest,
+				StampedAt:   readCutoff,
+				Session:     session,
 			},
 		)
 		switch {
@@ -760,8 +673,8 @@ func (m *Manager) extractSession(
 		if err := ctx.Err(); err != nil {
 			return outcome, err
 		}
-		// Eligibility can be lost while earlier units distill — a trash, an
-		// automation flag, a secret scan landing findings — so it is
+		// Eligibility can be lost while earlier units distill — a trash or an
+		// automation flag — so it is
 		// re-validated before every model call and again before persisting
 		// the call's output. Losing it fails closed: this pass's generated
 		// entries are discarded and coverage restarts from scratch if the
@@ -821,7 +734,7 @@ func (m *Manager) extractSession(
 			return outcome, nil
 		}
 		// The unit's output is committed under an in-transaction guard: the
-		// session snapshot, eligibility, and absence of findings are
+		// session snapshot and eligibility are
 		// re-verified atomically with the insert and cursor advance, and
 		// the evidence is bound to the host transcript (content digest,
 		// stable endpoint UUIDs) so the evidence reconciler can re-verify
@@ -832,7 +745,6 @@ func (m *Manager) extractSession(
 			Fingerprint:        m.fingerprint,
 			Digest:             digest,
 			Cursor:             i,
-			ScanVersions:       []string{secrets.RulesVersion()},
 			MessageCount:       session.MessageCount,
 			TranscriptRevision: session.TranscriptRevision,
 			LocalModifiedAt:    session.LocalModifiedAt,
@@ -895,11 +807,8 @@ func (m *Manager) extractSession(
 }
 
 // recheckExtraction re-reads the session mid-extraction and reports whether
-// it is still eligible (present, extractable, and free of secret findings of
-// any confidence) and whether its snapshot still matches the bracket's first
-// read. The findings query is separate because a scan under an unchanged
-// rules version can land candidate findings without touching any snapshot
-// field.
+// it is still eligible and whether its snapshot still matches the bracket's
+// first read.
 func (m *Manager) recheckExtraction(
 	ctx context.Context, sessionID string, before *db.Session,
 ) (eligible, unchanged bool, err error) {
@@ -908,13 +817,6 @@ func (m *Manager) recheckExtraction(
 		return false, false, err
 	}
 	if recheck == nil || extractableSession(sessionID, recheck) != nil {
-		return false, false, nil
-	}
-	findings, err := m.cfg.DB.SessionSecretFindings(ctx, sessionID)
-	if err != nil {
-		return false, false, err
-	}
-	if len(findings) > 0 {
 		return false, false, nil
 	}
 	return true, !sessionSnapshotChanged(before, recheck), nil
@@ -969,34 +871,6 @@ func (m *Manager) discardSessionOutput(
 		return err
 	}
 	return nil
-}
-
-// transcriptSecretMatches counts matches from the full secret ruleset over
-// the message content extraction sends to the model. Only Content reaches
-// the segmenter, so scanning it covers exactly the outbound material; tool
-// inputs and results stay the stored scan's concern.
-// aggregateModelSecretMatches scans the concatenation of exactly the
-// model-visible contents (see VisibleContents), in transcript order. See the
-// call site for why per-message scanning alone is not enough, and why the
-// raw contents — not the formatted unit texts — are the right aggregate to
-// scan. Two joins are scanned: newline-preserving keeps the structure of
-// multi-line secrets (a PEM block), and separator-free reconstructs a
-// single-token credential split mid-token across messages, which the newline
-// would otherwise break so a regex needing contiguous characters could not
-// match. Either matching means the material is present.
-func aggregateModelSecretMatches(messages []Message) int {
-	texts := VisibleContents(messages)
-	matches := len(secrets.Scan(strings.Join(texts, "\n")))
-	matches += len(secrets.Scan(strings.Join(texts, "")))
-	return matches
-}
-
-func transcriptSecretMatches(rows []db.Message) int {
-	matches := 0
-	for _, row := range rows {
-		matches += len(secrets.Scan(row.Content))
-	}
-	return matches
 }
 
 // distillSplit distills one text, halving it recursively when the model
@@ -1128,11 +1002,10 @@ func (m *Manager) maybeActivate(ctx context.Context) (bool, error) {
 	// corpus that is already stale. Failed sessions stay excluded (zero
 	// FailedRetryCutoff): they retry later and top the corpus up.
 	backlog, err := m.cfg.DB.ExtractCandidates(ctx, db.ExtractCandidateQuery{
-		Fingerprint:  m.fingerprint,
-		QuietCutoff:  time.Now().Add(-m.cfg.QuietPeriod),
-		ScanVersions: []string{secrets.RulesVersion()},
-		IncludeDone:  true,
-		Limit:        1,
+		Fingerprint: m.fingerprint,
+		QuietCutoff: time.Now().Add(-m.cfg.QuietPeriod),
+		IncludeDone: true,
+		Limit:       1,
 	})
 	if err != nil {
 		return false, err
@@ -1141,7 +1014,7 @@ func (m *Manager) maybeActivate(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	err = m.cfg.DB.ActivateExtractGeneration(
-		ctx, m.fingerprint, []string{secrets.RulesVersion()},
+		ctx, m.fingerprint, nil,
 		time.Now().Add(-m.cfg.QuietPeriod),
 	)
 	if errors.Is(err, db.ErrExtractActivationBlocked) {
@@ -1182,7 +1055,7 @@ func (m *Manager) Activate(ctx context.Context) error {
 		)
 	}
 	return m.cfg.DB.ActivateExtractGeneration(
-		ctx, m.fingerprint, []string{secrets.RulesVersion()},
+		ctx, m.fingerprint, nil,
 		time.Now().Add(-m.cfg.QuietPeriod),
 	)
 }
@@ -1217,7 +1090,6 @@ func (m *Manager) Status(ctx context.Context) (Status, error) {
 		Fingerprint:       m.fingerprint,
 		QuietCutoff:       now.Add(-m.cfg.QuietPeriod),
 		FailedRetryCutoff: now.Add(-m.cfg.FailureBackoff),
-		ScanVersions:      []string{secrets.RulesVersion()},
 		IncludeDone:       true,
 	})
 	if err != nil {
