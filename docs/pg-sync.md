@@ -95,6 +95,7 @@ agentsview pg push [target] [flags]
 | `--all` | `false` | Push every configured PG target sequentially |
 | `--full` | `false` | Force full local resync and re-push, bypassing change detection |
 | `--no-vectors` | `false` | Skip the semantic-search vector phase for this run |
+| `--recall-only` | `false` | Publish only Recall entries and evidence from a direct offline archive; refuses daemon delegation |
 | `--projects` | | Comma-separated projects to push (inclusive) |
 | `--exclude-projects` | | Comma-separated projects to exclude |
 | `--all-projects` | `false` | Ignore configured project filters for this run |
@@ -105,6 +106,14 @@ agentsview pg push [target] [flags]
 Without `--watch`, push is on-demand — run it whenever you want
 to sync. With `--watch`, the command stays in the foreground and
 keeps pushing until interrupted.
+
+`--recall-only` is the bounded recovery path for a verified offline archive:
+it skips local source sync and never publishes sessions, messages, curation,
+pricing, or vectors. It refuses `--watch` and refuses delegation to a running
+local daemon so an older daemon cannot ignore the new scope and perform a
+normal push. Run it with direct archive access (for example,
+`AGENTSVIEW_NO_DAEMON=1`) after separately proving the archive identity and
+session parity.
 
 When no target is passed, `pg push` uses the effective default target.
 Pass one named target explicitly to push just that destination, or use

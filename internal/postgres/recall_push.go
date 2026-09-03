@@ -10,6 +10,14 @@ import (
 
 const recallPublicationRevisionStateKey = "recall_publication_revision_v1"
 
+// PushRecall publishes only the local Recall corpus and its bounded evidence.
+// It deliberately skips session, message, curation, pricing, and vector
+// publication so a verified recovery archive can restore derived Recall state
+// without presenting itself as a replacement source archive.
+func (s *Sync) PushRecall(ctx context.Context, full bool) error {
+	return s.syncRecallPublication(ctx, s.effectiveSyncState(), full)
+}
+
 func (s *Sync) syncRecallPublication(
 	ctx context.Context, state syncStateStore, full bool,
 ) error {

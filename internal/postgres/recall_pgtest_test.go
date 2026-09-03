@@ -49,9 +49,7 @@ func TestRecallPublicationIsIncrementalAndMachineScoped(t *testing.T) {
 	require.NoError(t, err)
 	syncer.databaseGeneration, err = local.GetDatabaseID(ctx)
 	require.NoError(t, err)
-	require.NoError(t, syncer.syncRecallPublication(
-		ctx, syncer.effectiveSyncState(), false,
-	))
+	require.NoError(t, syncer.PushRecall(ctx, false))
 
 	store := &Store{pg: syncer.pg}
 	page, err := store.QueryRecallEntries(ctx, db.RecallQuery{

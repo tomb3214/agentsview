@@ -299,6 +299,15 @@ func TestPGPushWatchCommandPrefixesErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "pg push --watch: --all cannot be combined with --watch")
 }
 
+func TestPGPushRecallOnlyRejectsWatch(t *testing.T) {
+	_, err := executeCommand(
+		newRootCommand(), "pg", "push", "--recall-only", "--watch",
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(),
+		"--recall-only cannot be combined with --watch")
+}
+
 func TestPGStatusCommandPrefixesErrors(t *testing.T) {
 	dataDir := t.TempDir()
 	t.Setenv("AGENTSVIEW_DATA_DIR", dataDir)

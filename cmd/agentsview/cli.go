@@ -659,6 +659,11 @@ func newPGPushCommand() *cobra.Command {
 					),
 				)
 			}
+			if cfg.RecallOnly && cfg.Watch {
+				return fmt.Errorf(
+					"pg push --watch: --recall-only cannot be combined with --watch",
+				)
+			}
 			if cfg.Watch {
 				if err := runPGPushWatch(cfg, targetName); err != nil {
 					return fmt.Errorf("pg push --watch: %w", err)
@@ -684,6 +689,8 @@ func newPGPushCommand() *cobra.Command {
 	cmd.Flags().DurationVar(&cfg.Debounce, "debounce", defaultWatchDebounce, "Coalesce window after a change before pushing (--watch only)")
 	cmd.Flags().DurationVar(&cfg.Interval, "interval", defaultWatchInterval, "Periodic floor push interval (--watch only)")
 	cmd.Flags().BoolVar(&cfg.NoVectors, "no-vectors", false, "Skip pushing semantic-search vectors")
+	cmd.Flags().BoolVar(&cfg.RecallOnly, "recall-only", false,
+		"Push only Recall entries and evidence (offline archive only)")
 	return cmd
 }
 
