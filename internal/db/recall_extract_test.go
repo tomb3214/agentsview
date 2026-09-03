@@ -725,9 +725,8 @@ func TestCommitExtractedUnitRefusesDriftAndIneligibility(t *testing.T) {
 	assert.Zero(t, progress.UnitCursor,
 		"a drifted commit must not advance the cursor")
 
-	// A candidate-confidence finding recorded between the caller's recheck
-	// and the commit makes the session ineligible without changing the
-	// leak count.
+	// A finding does not invalidate a session when the caller's snapshot
+	// includes the scan write; model-input redaction owns that boundary.
 	finding := SecretFinding{
 		SessionID: "sess-1", RuleName: "jwt", Confidence: "candidate",
 		LocationKind: "message", RedactedMatch: "eyJ…",
@@ -741,10 +740,9 @@ func TestCommitExtractedUnitRefusesDriftAndIneligibility(t *testing.T) {
 	withFinding := commit
 	withFinding.TranscriptRevision = fresh.TranscriptRevision
 	withFinding.LocalModifiedAt = fresh.LocalModifiedAt
-	_, err = d.CommitExtractedUnit(ctx, withFinding)
-	require.ErrorIs(t, err, ErrExtractSessionDrifted,
-		"a finding recorded concurrently must refuse the commit even "+
-			"with a matching snapshot")
+	inserted, err := d.CommitExtractedUnit(ctx, withFinding)
+	require.NoError(t, err)
+	assert.Equal(t, 1, inserted)
 
 	// A trashed session refuses the commit outright.
 	session2 := seedCommitUnitSession(t, d, "sess-2")
@@ -834,14 +832,14 @@ func TestReconcileIneligibleExtractSessions(t *testing.T) {
 	rowsRemoved, entriesDeleted, err := d.ReconcileIneligibleExtractSessions(
 		ctx, time.Time{})
 	require.NoError(t, err)
-	assert.Equal(t, 4, rowsRemoved,
-		"three fp-a rows plus the trashed session's fp-old row")
-	assert.Equal(t, 4, entriesDeleted)
+	assert.Equal(t, 3, rowsRemoved,
+		"two fp-a rows plus the trashed session's fp-old row")
+	assert.Equal(t, 3, entriesDeleted)
 
 	for id, want := range map[string]bool{
 		"e-sess-trashed":   false,
 		"e-sess-automated": false,
-		"e-sess-finding":   false,
+		"e-sess-finding":   true,
 		"e-old-gen":        false,
 		"e-sess-ok":        true,
 		"e-human":          true,
@@ -853,7 +851,7 @@ func TestReconcileIneligibleExtractSessions(t *testing.T) {
 	}
 	for id, want := range map[string]bool{
 		"sess-trashed": false, "sess-automated": false,
-		"sess-finding": false, "sess-ok": true,
+		"sess-finding": true, "sess-ok": true,
 	} {
 		_, found, err := d.ExtractProgress(ctx, id, "fp-a")
 		require.NoError(t, err)
@@ -1502,20 +1500,18 @@ func TestExtractCandidatesFiltersIneligibleSessions(t *testing.T) {
 		ScanVersions: []string{"rules-v1"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"sess-ok"}, ids,
+	assert.Equal(t, []string{"sess-ok", "sess-secret"}, ids,
 		"unscanned and stale-scanned sessions must never be candidates")
 }
 
-func TestExtractCandidatesExcludeSessionsWithAnyFinding(t *testing.T) {
+func TestExtractCandidatesIncludeSessionsWithFindings(t *testing.T) {
 	d := testDB(t)
 	ctx := context.Background()
 
 	seedExtractCandidate(t, d, "sess-clean", 2*time.Hour, nil)
 	seedExtractCandidate(t, d, "sess-candidate", 2*time.Hour, nil)
-	// A candidate-confidence finding (e.g. a JWT or high-entropy match)
-	// is recorded but never counted in secret_leak_count. It must still
-	// disqualify the session: confidence tunes alerting, not what may be
-	// sent to a model.
+	// A candidate-confidence finding remains recorded for alerting and
+	// redaction, but does not discard the rest of the session.
 	require.NoError(t, d.ReplaceSessionSecretFindings(
 		"sess-candidate",
 		[]SecretFinding{{
@@ -1533,8 +1529,7 @@ func TestExtractCandidatesExcludeSessionsWithAnyFinding(t *testing.T) {
 		ScanVersions: []string{"rules-v1"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"sess-clean"}, ids,
-		"candidate findings must exclude a session even with leak count 0")
+	assert.ElementsMatch(t, []string{"sess-clean", "sess-candidate"}, ids)
 }
 
 func TestExtractCandidatesDoneRevisitUsesContentStamp(t *testing.T) {

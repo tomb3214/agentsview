@@ -57,10 +57,12 @@ model. A session is eligible only when all of the following hold:
   excluded, and the candidates query refuses to run without scan versions at
   all: the boundary fails closed. In practice this means sessions need
   `secrets scan --backfill` before they become eligible;
-- it has zero recorded secret findings **of any confidence**. The leak count
-  only counts definite findings; a candidate finding (a JWT, a high-entropy
-  blob) is exactly the material that must not reach the model either, so the
-  `secret_findings` table is consulted directly.
+- model-visible message content is passed through opaque secret redaction
+  before segmentation. Recorded findings do not exclude the whole session:
+  findings in tool inputs and results are not model-visible, while findings in
+  messages are replaced with `[REDACTED_SECRET]` and retain the surrounding
+  operational context. The redacted aggregate is scanned again before any
+  model call; a residual cross-message match still fails closed.
 
 None of these predicates are configurable. The quiet period is a scheduling
 knob; the privacy predicates are not.
@@ -89,9 +91,9 @@ watch. An unstable bracket skips the session silently: a concurrent write bumped
 `local_modified_at`, so the next pass retries against a settled view, and a
 newly ineligible session must simply not be extracted.
 
-Before distillation the manager also re-scans the transcript content it is about
-to send, independently of the stored scan stamp (an archive from an older binary
-can carry a clean stamp over content the scanner never saw). The re-scan runs
+Before distillation the manager redacts and then re-scans the transcript content
+it is about to send, independently of the stored scan stamp (an archive from an
+older binary can carry a clean stamp over content the scanner never saw). The re-scan runs
 over exactly the model-visible contents concatenated in transcript order (the
 same rows the segmenter keeps — system messages and unsupported roles dropped,
 each trimmed — so an intervening system message or boundary whitespace cannot
@@ -106,10 +108,8 @@ single-token credential split mid-token across messages that the newline would
 otherwise break. A match on either fails the session closed.
 
 The bracket does not end when distillation starts. Eligibility is re-validated —
-snapshot comparison, eligibility predicates, and a fresh secret-findings read (a
-scan under an unchanged rules version can land candidate findings without
-touching any snapshot field) — before every model call and again before
-persisting each call's output. A concurrent write stops the pass silently as
+snapshot comparison and eligibility predicates — before every model call and
+again before persisting each call's output. A concurrent write stops the pass silently as
 above. Losing eligibility mid-extraction fails closed: the session's generated
 entries are deleted and its progress row is reopened at cursor zero as a
 retryable failure, so nothing extracted under the lost eligibility persists and
@@ -118,8 +118,8 @@ a session that becomes eligible again re-extracts from scratch.
 The enforcement point is the unit commit itself. Each distilled unit's entries
 are persisted through a single transaction that re-verifies the session snapshot
 (`ended_at` included: a bare row update can reopen or re-date a session without
-touching any other guarded field), the eligibility predicates, and the absence
-of secret findings before inserting the entries and advancing the cursor from
+touching any other guarded field) and the eligibility predicates before
+inserting the entries and advancing the cursor from
 exactly the position the unit was derived at — a same-digest reopen resets the
 cursor after deleting entries, so a merely-monotonic advance would let a stale
 worker skip units that no longer have output — the pre-call recheck only saves a
@@ -138,8 +138,8 @@ runs and privacy retraction must not be schedulable away. Reconciliation runs
 before any model work (so an endpoint-scoped abort against a persistently broken
 endpoint cannot defer retraction) and again after the extraction loop (so
 eligibility lost while units were at the model is retracted in the same pass).
-Sessions since trashed, flagged automated, or carrying secret findings or leaks
-get their `unreviewed_auto` entries deleted across *all* registered generations
+Sessions since trashed or flagged automated get their `unreviewed_auto` entries
+deleted across *all* registered generations
 (a retired generation keeps serving until the next activation, so retraction is
 generation-independent) and their progress rows removed, so an excluded
 session's corpus stops serving, a lingering pending or partial row cannot block
@@ -393,8 +393,8 @@ work no progress-based gate can see), or if promotion would leave zero servable
 (accepted, provenance-verified) entries — a blocked activation changes nothing
 and the next pass retries after re-extraction. Promotion also re-verifies full
 eligibility inside the same transaction, and clears what fails it: any session
-no longer fully eligible — trashed, flagged automated, carrying findings,
-reopened, back inside the quiet period, or awaiting rescan after a write — has
+no longer fully eligible — trashed, flagged automated, reopened, back inside
+the quiet period, or awaiting rescan after a write — has
 its staged entries and progress rows deleted before the rest are promoted.
 Skipping instead of deleting would strand the output: an archived entry under a
 surviving progress row is never promoted or rediscovered once the generation is
