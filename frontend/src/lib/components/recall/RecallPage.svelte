@@ -16,9 +16,7 @@
     sync.serverVersion !== null ||
       (settings.loaded && settings.error === null),
   );
-  const corpusAvailable = $derived(
-    backendKnown && !sync.readOnly && !settings.readOnly,
-  );
+  const corpusAvailable = $derived(backendKnown);
   const tabOptions = $derived.by((): SegmentedControlOption[] => [
     ...(corpusAvailable
       ? [{ value: "corpus", label: m.recall_page_tab_corpus() }]
