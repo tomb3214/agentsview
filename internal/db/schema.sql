@@ -742,6 +742,25 @@ CREATE TABLE IF NOT EXISTS local_session_source_baselines (
 CREATE INDEX IF NOT EXISTS idx_local_source_baselines_ownership
     ON local_session_source_baselines(machine, agent, file_path, session_id);
 
+-- Exact machine-local proof that a native source was intentionally offloaded
+-- after its durable copy was verified.  Watch reconciliation must not convert
+-- these rows into source_missing tombstones while the archived transcript is
+-- deliberately absent from disk.  The file hash makes the exemption expire if
+-- the same session is later re-written with different content.
+CREATE TABLE IF NOT EXISTS local_session_source_retirements (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    machine    TEXT NOT NULL,
+    agent      TEXT NOT NULL,
+    file_path  TEXT NOT NULL,
+    file_hash  TEXT NOT NULL,
+    retired_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_local_source_retirements_ownership
+    ON local_session_source_retirements(
+        machine, agent, file_path, session_id, file_hash
+    );
+
 -- Remote skip cache: tracks file mtimes per remote host
 -- for SSH sync incremental optimization.
 CREATE TABLE IF NOT EXISTS remote_skipped_files (

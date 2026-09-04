@@ -5,6 +5,7 @@
 import type { BatchDeleteInputBody } from '../models/BatchDeleteInputBody';
 import type { DbSession } from '../models/DbSession';
 import type { DbSessionActivityResponse } from '../models/DbSessionActivityResponse';
+import type { DbSessionSourceRetirement } from '../models/DbSessionSourceRetirement';
 import type { DbSessionTiming } from '../models/DbSessionTiming';
 import type { DbSidebarSessionIndex } from '../models/DbSidebarSessionIndex';
 import type { EmptyTrashResponse } from '../models/EmptyTrashResponse';
@@ -19,6 +20,7 @@ import type { ResumeResponse } from '../models/ResumeResponse';
 import type { ServiceMessageList } from '../models/ServiceMessageList';
 import type { ServiceSessionDetail } from '../models/ServiceSessionDetail';
 import type { ServiceSessionList } from '../models/ServiceSessionList';
+import type { ServiceSessionSourceRetirementInput } from '../models/ServiceSessionSourceRetirementInput';
 import type { ServiceToolCallList } from '../models/ServiceToolCallList';
 import type { SessionDirectoryResponse } from '../models/SessionDirectoryResponse';
 import type { SessionUsageResponse } from '../models/SessionUsageResponse';
@@ -474,6 +476,36 @@ export class SessionsService {
         'order_by': orderBy,
         'descending': descending,
       },
+      errors: {
+        400: `Bad Request`,
+        401: `Unauthorized`,
+        403: `Forbidden`,
+        404: `Not Found`,
+        409: `Conflict`,
+        422: `Unprocessable Entity`,
+        500: `Internal Server Error`,
+        501: `Not Implemented`,
+        502: `Bad Gateway`,
+        503: `Service Unavailable`,
+        504: `Gateway Timeout`,
+      },
+    });
+  }
+  /**
+   * Retire an exact local session source
+   * @returns DbSessionSourceRetirement OK
+   * @throws ApiError
+   */
+  public static postApiV1SessionsSourceRetire({
+    requestBody,
+  }: {
+    requestBody: ServiceSessionSourceRetirementInput,
+  }): CancelablePromise<DbSessionSourceRetirement> {
+    return __request(OpenAPI, {
+      method: 'POST',
+      url: '/api/v1/sessions/source-retire',
+      body: requestBody,
+      mediaType: 'application/json',
       errors: {
         400: `Bad Request`,
         401: `Unauthorized`,

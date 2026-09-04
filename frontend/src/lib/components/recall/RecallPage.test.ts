@@ -63,7 +63,7 @@ describe("RecallPage", () => {
     expect(document.querySelector(".generated-insights-panel")).not.toBeNull();
   });
 
-  it("shows only Generated insights for a read-only backend", async () => {
+  it("shows the Recall corpus for a read-only PostgreSQL backend", async () => {
     sync.serverVersion = {
       version: "dev",
       commit: "unknown",
@@ -73,8 +73,8 @@ describe("RecallPage", () => {
     component = mount(RecallPage, { target: document.body });
     await tick();
 
-    expect(document.body.textContent).not.toContain("Corpus");
-    expect(document.querySelector(".generated-insights-panel")).not.toBeNull();
+    expect(document.body.textContent).toContain("Corpus");
+    expect(document.querySelector(".recall-corpus-panel")).not.toBeNull();
   });
 
   it("waits for backend capability before mounting either panel", async () => {

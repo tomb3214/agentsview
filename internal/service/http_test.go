@@ -972,6 +972,36 @@ func TestHTTPSearchContent(t *testing.T) {
 	assert.Equal(t, "s1", res.Matches[0].SessionID)
 }
 
+func TestHTTPRetireSessionSourceSendsExactIdentityAndDecodesReceipt(t *testing.T) {
+	t.Parallel()
+	const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	var got service.SessionSourceRetirementInput
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/api/v1/sessions/source-retire", r.URL.Path)
+		require.NoError(t, json.UnmarshalRead(r.Body, &got))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"session_id":"codex:task","machine":"machine","agent":"codex","file_path":"/archive/task.jsonl","file_hash":"` + hash + `","message_count":2,"retired_at":"2026-09-03T00:00:00Z"}`))
+	}))
+	defer srv.Close()
+
+	backend := service.NewHTTPBackend(srv.URL, "", false)
+	offloader, ok := backend.(service.SessionSourceOffloader)
+	require.True(t, ok)
+	receipt, err := offloader.RetireSessionSource(
+		context.Background(),
+		service.SessionSourceRetirementInput{
+			SessionID: "codex:task", Machine: "machine", Agent: "codex",
+			FilePath: "/archive/task.jsonl", FileHash: hash,
+		},
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, "codex:task", got.SessionID)
+	assert.Equal(t, hash, got.FileHash)
+	assert.Equal(t, 2, receipt.MessageCount)
+}
+
 func TestHTTPSearchContentSemanticSetsIntentHeader(t *testing.T) {
 	t.Parallel()
 	var gotIntent string

@@ -353,6 +353,55 @@ func (b *httpBackend) Sync(
 	return &detail, nil
 }
 
+func (b *httpBackend) RetireSessionSource(
+	ctx context.Context,
+	in SessionSourceRetirementInput,
+) (*db.SessionSourceRetirement, error) {
+	if b.readOnly {
+		return nil, fmt.Errorf(
+			"retire session source: daemon at %s is read-only: %w",
+			b.baseURL, db.ErrReadOnly,
+		)
+	}
+	body, err := json.Marshal(in)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodPost,
+		b.baseURL+"/api/v1/sessions/source-retire",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", b.baseURL)
+	b.addAuth(req)
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotImplemented {
+		return nil, fmt.Errorf(
+			"retire session source: daemon at %s: %w",
+			b.baseURL, db.ErrReadOnly,
+		)
+	}
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf(
+			"retire session source: HTTP %d: %s", resp.StatusCode, msg,
+		)
+	}
+	var receipt db.SessionSourceRetirement
+	if err := json.UnmarshalRead(resp.Body, &receipt); err != nil {
+		return nil, err
+	}
+	return &receipt, nil
+}
+
 func (b *httpBackend) Watch(
 	ctx context.Context, id string,
 ) (<-chan Event, error) {

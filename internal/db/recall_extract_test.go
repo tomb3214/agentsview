@@ -725,9 +725,9 @@ func TestCommitExtractedUnitRefusesDriftAndIneligibility(t *testing.T) {
 	assert.Zero(t, progress.UnitCursor,
 		"a drifted commit must not advance the cursor")
 
-	// A candidate-confidence finding recorded between the caller's recheck
-	// and the commit makes the session ineligible without changing the
-	// leak count.
+	// Credential findings are independent from Recall eligibility. Recording
+	// one between the caller's recheck and commit must not reject otherwise
+	// valid output.
 	finding := SecretFinding{
 		SessionID: "sess-1", RuleName: "jwt", Confidence: "candidate",
 		LocationKind: "message", RedactedMatch: "eyJ…",
@@ -742,9 +742,10 @@ func TestCommitExtractedUnitRefusesDriftAndIneligibility(t *testing.T) {
 	withFinding.TranscriptRevision = fresh.TranscriptRevision
 	withFinding.LocalModifiedAt = fresh.LocalModifiedAt
 	_, err = d.CommitExtractedUnit(ctx, withFinding)
-	require.ErrorIs(t, err, ErrExtractSessionDrifted,
-		"a finding recorded concurrently must refuse the commit even "+
-			"with a matching snapshot")
+	require.NoError(t, err)
+	entry, err = d.GetRecallEntry(ctx, "e-1")
+	require.NoError(t, err)
+	require.NotNil(t, entry)
 
 	// A trashed session refuses the commit outright.
 	session2 := seedCommitUnitSession(t, d, "sess-2")
@@ -834,14 +835,14 @@ func TestReconcileIneligibleExtractSessions(t *testing.T) {
 	rowsRemoved, entriesDeleted, err := d.ReconcileIneligibleExtractSessions(
 		ctx, time.Time{})
 	require.NoError(t, err)
-	assert.Equal(t, 4, rowsRemoved,
-		"three fp-a rows plus the trashed session's fp-old row")
-	assert.Equal(t, 4, entriesDeleted)
+	assert.Equal(t, 3, rowsRemoved,
+		"two fp-a rows plus the trashed session's fp-old row")
+	assert.Equal(t, 3, entriesDeleted)
 
 	for id, want := range map[string]bool{
 		"e-sess-trashed":   false,
 		"e-sess-automated": false,
-		"e-sess-finding":   false,
+		"e-sess-finding":   true,
 		"e-old-gen":        false,
 		"e-sess-ok":        true,
 		"e-human":          true,
@@ -853,7 +854,7 @@ func TestReconcileIneligibleExtractSessions(t *testing.T) {
 	}
 	for id, want := range map[string]bool{
 		"sess-trashed": false, "sess-automated": false,
-		"sess-finding": false, "sess-ok": true,
+		"sess-finding": true, "sess-ok": true,
 	} {
 		_, found, err := d.ExtractProgress(ctx, id, "fp-a")
 		require.NoError(t, err)
@@ -1502,20 +1503,19 @@ func TestExtractCandidatesFiltersIneligibleSessions(t *testing.T) {
 		ScanVersions: []string{"rules-v1"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"sess-ok"}, ids,
-		"unscanned and stale-scanned sessions must never be candidates")
+	assert.Equal(t, []string{
+		"sess-ok", "sess-secret", "sess-stale-scan", "sess-unscanned",
+	}, ids, "credential scan state must not remove human sessions from Recall")
 }
 
-func TestExtractCandidatesExcludeSessionsWithAnyFinding(t *testing.T) {
+func TestExtractCandidatesIncludeSessionsWithCredentialFindings(t *testing.T) {
 	d := testDB(t)
 	ctx := context.Background()
 
 	seedExtractCandidate(t, d, "sess-clean", 2*time.Hour, nil)
 	seedExtractCandidate(t, d, "sess-candidate", 2*time.Hour, nil)
-	// A candidate-confidence finding (e.g. a JWT or high-entropy match)
-	// is recorded but never counted in secret_leak_count. It must still
-	// disqualify the session: confidence tunes alerting, not what may be
-	// sent to a model.
+	// Findings remain available to the separate credential scanner, but they
+	// no longer disqualify an otherwise eligible human session from Recall.
 	require.NoError(t, d.ReplaceSessionSecretFindings(
 		"sess-candidate",
 		[]SecretFinding{{
@@ -1533,8 +1533,7 @@ func TestExtractCandidatesExcludeSessionsWithAnyFinding(t *testing.T) {
 		ScanVersions: []string{"rules-v1"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"sess-clean"}, ids,
-		"candidate findings must exclude a session even with leak count 0")
+	assert.ElementsMatch(t, []string{"sess-candidate", "sess-clean"}, ids)
 }
 
 func TestExtractCandidatesDoneRevisitUsesContentStamp(t *testing.T) {
@@ -1712,14 +1711,13 @@ func TestRetireExtractGenerationArchivesServedEntries(t *testing.T) {
 		"retiring a generation must stop serving its entries")
 }
 
-func TestExtractCandidatesRequireScanVersions(t *testing.T) {
+func TestExtractCandidatesDoNotRequireScanVersions(t *testing.T) {
 	d := testDB(t)
 	_, err := d.ExtractCandidates(context.Background(), ExtractCandidateQuery{
 		Fingerprint: "fp-a",
 		QuietCutoff: time.Now(),
 	})
-	require.Error(t, err,
-		"a query without scan versions would treat unscanned as clean")
+	require.NoError(t, err)
 }
 
 func TestExtractCandidatesRespectsProgressState(t *testing.T) {
@@ -2182,8 +2180,8 @@ func TestTranscriptMutationInvalidatesSecretScanFreshness(t *testing.T) {
 		ScanVersions: []string{"rules-v1"},
 	})
 	require.NoError(t, err)
-	assert.NotContains(t, ids, "sess-1",
-		"a session whose scan was invalidated must not be a candidate")
+	assert.Contains(t, ids, "sess-1",
+		"credential scan freshness must not gate Recall")
 }
 
 func TestReplaceSessionContentEndsScanStamped(t *testing.T) {
@@ -2522,8 +2520,6 @@ func TestActivateExtractGenerationResetsTransientlyIneligibleStagedOutput(
 	t *testing.T,
 ) {
 	cases := map[string]string{
-		"scan stamp cleared": "UPDATE sessions SET secrets_rules_version " +
-			"= '' WHERE id = 'sess-flux'",
 		"session reopened": "UPDATE sessions SET ended_at = NULL " +
 			"WHERE id = 'sess-flux'",
 	}
@@ -2590,8 +2586,6 @@ func TestActivateExtractGenerationResetsTransientlyIneligibleUnfinishedCoverage(
 	t *testing.T,
 ) {
 	cases := map[string]string{
-		"scan stamp cleared": "UPDATE sessions SET secrets_rules_version " +
-			"= '' WHERE id = 'sess-flux'",
 		"session reopened": "UPDATE sessions SET ended_at = NULL " +
 			"WHERE id = 'sess-flux'",
 	}
@@ -2678,8 +2672,7 @@ func TestActivateExtractGenerationClearsHardIneligibleStagedOutput(
 }
 
 // TestActivateExtractGenerationRefusesDriftedDoneCoverage pins the in-tx
-// staleness gates: a transcript write since the coverage stamp, or a scan
-// stamp no longer current, means the staged entries describe a transcript
+// staleness gates: a transcript write since the coverage stamp means the staged entries describe a transcript
 // state that was never re-approved — such coverage must not be promoted
 // even though it never re-enters the caller's backlog probe.
 func TestActivateExtractGenerationRefusesDriftedDoneCoverage(t *testing.T) {
@@ -2696,11 +2689,6 @@ func TestActivateExtractGenerationRefusesDriftedDoneCoverage(t *testing.T) {
 		ContentDigest: "dg", UnitsTotal: 0, StampedAt: time.Now(),
 	})
 	require.NoError(t, err)
-
-	err = d.ActivateExtractGeneration(
-		ctx, "fp-a", []string{"rules-v2"}, time.Now())
-	require.ErrorIs(t, err, ErrExtractActivationBlocked,
-		"a session scanned under a superseded rules version is uncovered")
 
 	time.Sleep(2 * time.Millisecond)
 	require.NoError(t, d.BumpLocalModifiedAt("sess-1"))

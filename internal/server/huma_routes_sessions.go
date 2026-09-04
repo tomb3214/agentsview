@@ -50,9 +50,36 @@ func (s *Server) registerSessionRoutes() {
 	s.post(group, "/sessions/batch-delete", "Batch delete sessions", s.humaBatchDeleteSessions)
 	s.deleteRoute(group, "/sessions/{id}", "Delete session", s.humaDeleteSession)
 	s.post(group, "/sessions/{id}/restore", "Restore session", s.humaRestoreSession)
+	s.post(group, "/sessions/source-retire", "Retire an exact local session source", s.humaRetireSessionSource)
 	s.deleteRoute(group, "/sessions/{id}/permanent", "Permanently delete session", s.humaPermanentDeleteSession)
 	s.get(group, "/trash", "List trash", s.humaListTrash)
 	s.deleteRoute(group, "/trash", "Empty trash", s.humaEmptyTrash)
+}
+
+type sessionSourceRetirementInput struct {
+	Body service.SessionSourceRetirementInput
+}
+
+func (s *Server) humaRetireSessionSource(
+	ctx context.Context,
+	in *sessionSourceRetirementInput,
+) (*jsonOutput[*db.SessionSourceRetirement], error) {
+	if in.Body.SessionID == "" || in.Body.Machine == "" || in.Body.Agent == "" ||
+		in.Body.FilePath == "" || in.Body.FileHash == "" {
+		return nil, apiError(http.StatusBadRequest, "exact session source identity and hash are required")
+	}
+	offloader, ok := s.sessions.(service.SessionSourceOffloader)
+	if !ok {
+		return nil, apiError(http.StatusNotImplemented, "session source retirement is unavailable")
+	}
+	receipt, err := offloader.RetireSessionSource(ctx, in.Body)
+	if err != nil {
+		if errors.Is(err, db.ErrReadOnly) {
+			return nil, apiError(http.StatusNotImplemented, err.Error())
+		}
+		return nil, apiError(http.StatusConflict, err.Error())
+	}
+	return &jsonOutput[*db.SessionSourceRetirement]{Body: receipt}, nil
 }
 
 type messageDirection string
