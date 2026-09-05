@@ -1596,9 +1596,9 @@ func createPartialIndexesPG(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// createContentSearchIndexesPG adds a pg_trgm GIN index on messages.content so
-// the content search (ILIKE '%pattern%') is index-accelerated instead of
-// sequentially scanning the messages table as history grows.
+// createContentSearchIndexesPG indexes every field searched by substring mode.
+// Indexing messages alone still leaves broad searches scanning tool payloads
+// before the combined results can be ordered and limited.
 //
 // It is best-effort and never fails schema setup. pg_trgm is a trusted
 // extension on PostgreSQL 13+, but a role without CREATE privilege (or a
@@ -1634,26 +1634,27 @@ func createContentSearchIndexesPG(ctx context.Context, db *sql.DB) {
 	// fastupdate=off keeps the index bounded: the default fastupdate=on
 	// buffers inserts into a pending list that only VACUUM merges, which grows
 	// unbounded when continuous ingest starves autovacuum.
-	if _, err := db.ExecContext(ctx, fmt.Sprintf(
-		`CREATE INDEX IF NOT EXISTS idx_messages_content_trgm
-		 ON messages USING gin (content %s.gin_trgm_ops)
-		 WITH (fastupdate = off)`, quotedExt,
-	)); err != nil {
-		log.Printf(
-			"pg schema: creating messages.content trigram index failed: %v", err,
-		)
-		return
-	}
-	// CREATE INDEX IF NOT EXISTS only applies WITH (fastupdate = off) on
-	// first creation. Re-apply on every boot so stores upgraded from a
-	// prior schema (which left fastupdate=on) also get the bounded index.
-	if _, err := db.ExecContext(ctx,
-		`ALTER INDEX idx_messages_content_trgm SET (fastupdate = off)`,
-	); err != nil {
-		log.Printf(
-			"pg schema: disabling fastupdate on messages.content trigram index failed: %v",
-			err,
-		)
+	for _, index := range []struct{ name, table, column string }{
+		{"idx_messages_content_trgm", "messages", "content"},
+		{"idx_tool_calls_input_trgm", "tool_calls", "input_json"},
+		{"idx_tool_calls_result_trgm", "tool_calls", "result_content"},
+		{"idx_tool_result_events_content_trgm", "tool_result_events", "content"},
+	} {
+		if _, err := db.ExecContext(ctx, fmt.Sprintf(
+			`CREATE INDEX IF NOT EXISTS %s ON %s
+			 USING gin (%s %s.gin_trgm_ops) WITH (fastupdate = off)`,
+			index.name, index.table, index.column, quotedExt,
+		)); err != nil {
+			log.Printf("pg schema: creating %s trigram index failed: %v", index.name, err)
+			continue
+		}
+		// IF NOT EXISTS preserves the options of an existing index. Keep
+		// the same write policy when upgrading an older schema.
+		if _, err := db.ExecContext(ctx, fmt.Sprintf(
+			`ALTER INDEX %s SET (fastupdate = off)`, index.name,
+		)); err != nil {
+			log.Printf("pg schema: disabling fastupdate on %s failed: %v", index.name, err)
+		}
 	}
 }
 
