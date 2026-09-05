@@ -44,8 +44,7 @@ commands. Do not copy their catalogues into this file.
 1. Do not amend, squash, rebase, push, or pull unless the user asks.
 1. Do not add generated-with lines, attribution blocks, validation footers, or
    command transcripts to commit messages.
-1. Deliver changes through pull requests from feature branches. Never merge a
-   pull request; merging is the user's decision.
+1. Deliver changes through pull requests from feature branches.
 
 ## Safety
 
