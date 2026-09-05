@@ -1631,9 +1631,9 @@ func createContentSearchIndexesPG(ctx context.Context, db *sql.DB) {
 		log.Printf("pg schema: invalid pg_trgm schema %q: %v", extSchema, err)
 		return
 	}
-	// fastupdate=off keeps the index bounded: the default fastupdate=on
-	// buffers inserts into a pending list that only VACUUM merges, which grows
-	// unbounded when continuous ingest starves autovacuum.
+	// Match the existing messages index policy: maintain the main index on
+	// each write instead of buffering changes in a pending list. This adds
+	// write work but avoids pending-list cleanup spikes during ingestion.
 	for _, index := range []struct{ name, table, column string }{
 		{"idx_messages_content_trgm", "messages", "content"},
 		{"idx_tool_calls_input_trgm", "tool_calls", "input_json"},
