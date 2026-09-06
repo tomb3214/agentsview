@@ -1631,9 +1631,8 @@ func createContentSearchIndexesPG(ctx context.Context, db *sql.DB) {
 		log.Printf("pg schema: invalid pg_trgm schema %q: %v", extSchema, err)
 		return
 	}
-	// Match the existing messages index policy: maintain the main index on
-	// each write instead of buffering changes in a pending list. This adds
-	// write work but avoids pending-list cleanup spikes during ingestion.
+	// New indexes maintain the main index on each write to avoid pending-list
+	// cleanup spikes. Preserve administrator-selected options on existing indexes.
 	for _, index := range []struct{ name, table, column string }{
 		{"idx_messages_content_trgm", "messages", "content"},
 		{"idx_tool_calls_input_trgm", "tool_calls", "input_json"},
@@ -1647,13 +1646,6 @@ func createContentSearchIndexesPG(ctx context.Context, db *sql.DB) {
 		)); err != nil {
 			log.Printf("pg schema: creating %s trigram index failed: %v", index.name, err)
 			continue
-		}
-		// IF NOT EXISTS preserves the options of an existing index. Keep
-		// the same write policy when upgrading an older schema.
-		if _, err := db.ExecContext(ctx, fmt.Sprintf(
-			`ALTER INDEX %s SET (fastupdate = off)`, index.name,
-		)); err != nil {
-			log.Printf("pg schema: disabling fastupdate on %s failed: %v", index.name, err)
 		}
 	}
 }
