@@ -27,6 +27,7 @@ const (
 	lastPushBoundaryStateKey           = "last_push_boundary_state"
 	lastPushSourceArchiveIDKey         = "pg_source_archive_id_v1"
 	lastPushTargetFingerprintKey       = "pg_target_fingerprint_v1"
+	fullPushProgressStateKey           = "pg_full_push_progress_v1"
 	sessionAliasBackfillStateKey       = "pg_session_alias_backfill_v1"
 	legacyProjectIdentityStateKey      = "project_identity_publication_revision_v2"
 	projectIdentityPublicationStateKey = "project_identity_publication_revision_v3"
@@ -36,12 +37,13 @@ const (
 )
 
 // pushMarkerIDStateKey names the local sync-state entry holding this DB's
-// stable push-marker identifier. The push-marker prefixes form PG
-// sync_metadata keys for reset-detection marker rows.
+// stable push-marker identifier. These prefixes form PG sync_metadata keys
+// for reset-detection and in-progress full-push run marker rows.
 const (
 	pushMarkerIDStateKey              = "pg_push_marker_id"
 	pushMarkerKeyPrefix               = "push_marker:"
 	pushMarkerMachineAliasesKeyPrefix = "push_marker_machine_aliases:"
+	fullPushRunMarkerKeyPrefix        = "push_run:full:v1:"
 )
 
 var errSessionOwnershipConflict = errors.New("session ownership conflict")
@@ -49,6 +51,23 @@ var errSessionExcluded = errors.New("session excluded")
 
 type pushBoundaryState struct {
 	Cutoff       string            `json:"cutoff"`
+	Fingerprints map[string]string `json:"fingerprints"`
+}
+
+// fullPushIdentity identifies the local archive, destination, and effective
+// push scope for one in-progress full push. A completed push still uses the
+// normal watermark and boundary state; this identity only makes a committed
+// batch safe to resume before that finalization occurs.
+type fullPushIdentity struct {
+	TargetFingerprint        string `json:"target_fingerprint"`
+	Scope                    string `json:"scope"`
+	SourceArchiveID          string `json:"source_archive_id"`
+	SourceDatabaseGeneration string `json:"source_database_generation"`
+	MarkerID                 string `json:"marker_id"`
+}
+
+type fullPushProgressState struct {
+	fullPushIdentity
 	Fingerprints map[string]string `json:"fingerprints"`
 }
 
@@ -258,6 +277,13 @@ func (s *Sync) PushWithOptions(
 	if err != nil {
 		return result, err
 	}
+	pushIdentity := fullPushIdentity{
+		TargetFingerprint:        s.targetFingerprint,
+		Scope:                    s.syncStateTarget,
+		SourceArchiveID:          s.archiveID,
+		SourceDatabaseGeneration: s.databaseGeneration,
+		MarkerID:                 markerID,
+	}
 	legacyMarkerMachines := pushMarkerLegacyMachines(
 		markerMachine, markerMachineAliases,
 	)
@@ -308,29 +334,6 @@ func (s *Sync) PushWithOptions(
 			"pgsync: transcript revision backfill marker missing; forcing full push",
 		)
 	}
-	if full {
-		lastPush = ""
-		// Caller requested a full push — the PG schema
-		// may have been dropped since schemaDone was set.
-		// Clear the memo so EnsureSchema re-runs.
-		s.schemaMu.Lock()
-		s.schemaDone = false
-		s.schemaMu.Unlock()
-		if err := s.normalizeSyncTimestamps(
-			ctx,
-		); err != nil {
-			return result, err
-		}
-		// When a filtered full push runs, clear persisted
-		// watermark and boundary state so the next
-		// unfiltered push also starts from scratch.
-		if s.isFiltered() && !pushStateCleared {
-			if err := clearPushState(state); err != nil {
-				return result, err
-			}
-		}
-	}
-
 	// Coherence check: if local push state says we've pushed before
 	// but this host's push marker is gone from PG, the PG side was
 	// reset (schema dropped, DB recreated, etc.). Force a full push
@@ -364,6 +367,59 @@ func (s *Sync) PushWithOptions(
 				if err := clearPushState(state); err != nil {
 					return result, err
 				}
+			}
+		}
+	}
+	var fullPushProgress *fullPushProgressState
+	storedFullPushProgress, progressPresent, err :=
+		readFullPushProgressState(state)
+	if err != nil {
+		return result, err
+	}
+	if progressPresent {
+		runMarkerMatches, err := s.fullPushRunMarkerMatches(
+			ctx, pushIdentity,
+		)
+		if err != nil {
+			return result, err
+		}
+		if !storedFullPushProgress.matches(pushIdentity) ||
+			!runMarkerMatches {
+			log.Printf(
+				"pgsync: discarding stale full-push progress; restarting full push",
+			)
+			if err := clearFullPushProgressState(state); err != nil {
+				return result, err
+			}
+			full = true
+		} else {
+			log.Printf(
+				"pgsync: resuming full push with %d committed session(s)",
+				len(storedFullPushProgress.Fingerprints),
+			)
+			fullPushProgress = &storedFullPushProgress
+			full = true
+		}
+	}
+	if full {
+		lastPush = ""
+		// Caller requested a full push — the PG schema
+		// may have been dropped since schemaDone was set.
+		// Clear the memo so EnsureSchema re-runs.
+		s.schemaMu.Lock()
+		s.schemaDone = false
+		s.schemaMu.Unlock()
+		if err := s.normalizeSyncTimestamps(
+			ctx,
+		); err != nil {
+			return result, err
+		}
+		// When a filtered full push runs, clear persisted
+		// watermark and boundary state so the next
+		// unfiltered push also starts from scratch.
+		if s.isFiltered() && !pushStateCleared {
+			if err := clearPushState(state); err != nil {
+				return result, err
 			}
 		}
 	}
@@ -437,10 +493,6 @@ func (s *Sync) PushWithOptions(
 			return result, bErr
 		}
 	}
-	for _, id := range reconciledScopeMoveIDs {
-		delete(priorFingerprints, id)
-	}
-
 	if err := purgePGExcludedPushSessions(
 		ctx, s.pg, sessionByID,
 	); err != nil {
@@ -507,9 +559,36 @@ func (s *Sync) PushWithOptions(
 	}
 	reportPrepare(prepared)
 
+	if full {
+		if fullPushProgress == nil {
+			progress := newFullPushProgressState(pushIdentity)
+			fullPushProgress = &progress
+		}
+		retained := make(map[string]string, len(fullPushProgress.Fingerprints))
+		for id, fingerprint := range fullPushProgress.Fingerprints {
+			if _, ok := sessionFingerprints[id]; ok {
+				retained[id] = fingerprint
+			}
+		}
+		fullPushProgress.Fingerprints = retained
+		priorFingerprints = maps.Clone(retained)
+	}
+	for _, id := range reconciledScopeMoveIDs {
+		delete(priorFingerprints, id)
+	}
+
+	var pushed []db.Session
 	if len(priorFingerprints) > 0 {
-		for id := range sessionByID {
-			if priorFingerprints[id] == sessionFingerprints[id] {
+		for id, sess := range sessionByID {
+			if priorFingerprint, ok := priorFingerprints[id]; ok &&
+				priorFingerprint != "" &&
+				priorFingerprint == sessionFingerprints[id] {
+				if fullPushProgress != nil {
+					// Keep resumed sessions in the final boundary state;
+					// they are omitted from the relational work below and
+					// therefore remain absent from the pushed result counts.
+					pushed = append(pushed, sess)
+				}
 				delete(sessionByID, id)
 			}
 		}
@@ -530,6 +609,18 @@ func (s *Sync) PushWithOptions(
 	var vectorScope []string
 	if opts.ScopeVectorsToChangedSessions && !full {
 		vectorScope = mapKeys(sessionByID)
+	}
+	if fullPushProgress != nil {
+		if err := persistFullPushProgressState(
+			state, *fullPushProgress,
+		); err != nil {
+			return result, err
+		}
+	}
+	var fullPushRunIdentity *fullPushIdentity
+	if fullPushProgress != nil {
+		identity := fullPushProgress.fullPushIdentity
+		fullPushRunIdentity = &identity
 	}
 
 	if len(sessions) == 0 {
@@ -601,23 +692,37 @@ func (s *Sync) PushWithOptions(
 		if err != nil {
 			return result, err
 		}
+		if fullPushProgress != nil {
+			if err := clearFullPushProgressState(state); err != nil {
+				return result, err
+			}
+			if err := s.clearFullPushRunMarker(
+				ctx, fullPushProgress.MarkerID,
+			); err != nil {
+				return result, err
+			}
+		}
 		result.Duration = time.Since(start)
 		return result, nil
 	}
 
-	var pushed []db.Session
 	// Sessions whose individual retry also failed: their PG sessions/messages
 	// rows are stale or absent, so the vector phase must not push their newer
 	// local vectors ahead of them.
 	var failedSessions map[string]struct{}
+	progressOffset := 0
+	if fullPushProgress != nil {
+		progressOffset = len(pushed)
+	}
 	const batchSize = 50
 	for i := 0; i < len(sessions); i += batchSize {
 		end := min(i+batchSize, len(sessions))
 		batch := sessions[i:end]
 
+		batchPushedStart := len(pushed)
 		batchResult, err := s.pushBatch(
 			ctx, batch, full, markerID, legacyMarkerMachines,
-			usageFingerprints, &pushed,
+			usageFingerprints, &pushed, fullPushRunIdentity,
 		)
 		if err != nil {
 			return result, err
@@ -626,14 +731,23 @@ func (s *Sync) PushWithOptions(
 			result.SessionsPushed += batchResult.sessions
 			result.MessagesPushed += batchResult.messages
 			result.SkippedConflicts += batchResult.skippedConflicts
+			if fullPushProgress != nil {
+				if err := persistFullPushProgressSessions(
+					state, fullPushProgress,
+					pushed[batchPushedStart:], sessionFingerprints,
+				); err != nil {
+					return result, err
+				}
+			}
 		} else {
 			// Batch failed — retry each session individually
 			// so one bad session doesn't block the rest.
 			for _, sess := range batch {
+				sessionPushedStart := len(pushed)
 				sr, retryErr := s.pushBatch(
 					ctx, []db.Session{sess},
 					full, markerID, legacyMarkerMachines,
-					usageFingerprints, &pushed,
+					usageFingerprints, &pushed, fullPushRunIdentity,
 				)
 				if retryErr != nil {
 					return result, retryErr
@@ -642,6 +756,14 @@ func (s *Sync) PushWithOptions(
 					result.SessionsPushed += sr.sessions
 					result.MessagesPushed += sr.messages
 					result.SkippedConflicts += sr.skippedConflicts
+					if fullPushProgress != nil {
+						if err := persistFullPushProgressSessions(
+							state, fullPushProgress,
+							pushed[sessionPushedStart:], sessionFingerprints,
+						); err != nil {
+							return result, err
+						}
+					}
 				} else {
 					result.Errors++
 					if failedSessions == nil {
@@ -653,8 +775,8 @@ func (s *Sync) PushWithOptions(
 		}
 		if onProgress != nil {
 			onProgress(PushProgress{
-				SessionsDone:     end,
-				SessionsTotal:    len(sessions),
+				SessionsDone:     progressOffset + end,
+				SessionsTotal:    progressOffset + len(sessions),
 				MessagesDone:     result.MessagesPushed,
 				SkippedConflicts: result.SkippedConflicts,
 				Errors:           result.Errors,
@@ -747,6 +869,16 @@ func (s *Sync) PushWithOptions(
 	)
 	if err != nil {
 		return result, err
+	}
+	if fullPushProgress != nil && result.Errors == 0 {
+		if err := clearFullPushProgressState(state); err != nil {
+			return result, err
+		}
+		if err := s.clearFullPushRunMarker(
+			ctx, fullPushProgress.MarkerID,
+		); err != nil {
+			return result, err
+		}
 	}
 	result.Duration = time.Since(start)
 	return result, nil
@@ -1244,6 +1376,155 @@ func (s *Sync) pushMarkerID() (string, error) {
 	return storedID, nil
 }
 
+func newFullPushProgressState(identity fullPushIdentity) fullPushProgressState {
+	return fullPushProgressState{
+		fullPushIdentity: identity,
+		Fingerprints:     make(map[string]string),
+	}
+}
+
+func (p fullPushProgressState) matches(identity fullPushIdentity) bool {
+	if p.fullPushIdentity != identity || p.Fingerprints == nil {
+		return false
+	}
+	for sessionID, fingerprint := range p.Fingerprints {
+		if sessionID == "" || fingerprint == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func readFullPushProgressState(
+	local syncStateStore,
+) (fullPushProgressState, bool, error) {
+	raw, err := local.GetSyncState(fullPushProgressStateKey)
+	if err != nil {
+		return fullPushProgressState{}, false, fmt.Errorf(
+			"reading %s: %w", fullPushProgressStateKey, err,
+		)
+	}
+	if raw == "" {
+		return fullPushProgressState{}, false, nil
+	}
+	var state fullPushProgressState
+	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		// Treat malformed progress as stale state. The next full push will
+		// rebuild it after the candidate fingerprint scan.
+		return fullPushProgressState{}, true, nil
+	}
+	if state.Fingerprints == nil {
+		return fullPushProgressState{}, true, nil
+	}
+	return state, true, nil
+}
+
+func clearFullPushProgressState(local syncStateStore) error {
+	if err := local.SetSyncState(fullPushProgressStateKey, ""); err != nil {
+		return fmt.Errorf(
+			"clearing %s: %w", fullPushProgressStateKey, err,
+		)
+	}
+	return nil
+}
+
+func persistFullPushProgressState(
+	local syncStateStore, state fullPushProgressState,
+) error {
+	if state.Fingerprints == nil {
+		state.Fingerprints = make(map[string]string)
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf(
+			"encoding %s: %w", fullPushProgressStateKey, err,
+		)
+	}
+	if err := local.SetSyncState(
+		fullPushProgressStateKey, string(data),
+	); err != nil {
+		return fmt.Errorf(
+			"writing %s: %w", fullPushProgressStateKey, err,
+		)
+	}
+	return nil
+}
+
+func persistFullPushProgressSessions(
+	local syncStateStore,
+	state *fullPushProgressState,
+	sessions []db.Session,
+	fingerprints map[string]string,
+) error {
+	for _, sess := range sessions {
+		fingerprint, ok := fingerprints[sess.ID]
+		if !ok {
+			return fmt.Errorf(
+				"missing session fingerprint for full-push progress %s",
+				sess.ID,
+			)
+		}
+		state.Fingerprints[sess.ID] = fingerprint
+	}
+	return persistFullPushProgressState(local, *state)
+}
+
+func (s *Sync) fullPushRunMetadataKey(markerID string) string {
+	return s.pushMarkerMetadataKey(fullPushRunMarkerKeyPrefix, markerID)
+}
+
+func (s *Sync) fullPushRunMarkerMatches(
+	ctx context.Context, identity fullPushIdentity,
+) (bool, error) {
+	raw, exists, err := s.pgPushMarkerMetadataValue(
+		ctx, s.fullPushRunMetadataKey(identity.MarkerID),
+	)
+	if err != nil {
+		return false, fmt.Errorf("checking full push run marker: %w", err)
+	}
+	if !exists {
+		return false, nil
+	}
+	var stored fullPushIdentity
+	if err := json.Unmarshal([]byte(raw), &stored); err != nil {
+		return false, nil
+	}
+	return stored == identity, nil
+}
+
+func (s *Sync) writeFullPushRunMarkerTx(
+	ctx context.Context, tx *sql.Tx, identity fullPushIdentity,
+) error {
+	value, err := json.Marshal(identity)
+	if err != nil {
+		return fmt.Errorf("encoding full push run marker: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO sync_metadata (key, value)
+		 VALUES ($1, $2)
+		 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+		s.fullPushRunMetadataKey(identity.MarkerID), string(value),
+	); err != nil {
+		return fmt.Errorf("writing full push run marker: %w", err)
+	}
+	return nil
+}
+
+func (s *Sync) clearFullPushRunMarker(
+	ctx context.Context, markerID string,
+) error {
+	if _, err := s.pg.ExecContext(ctx,
+		`DELETE FROM sync_metadata WHERE key = $1`,
+		s.fullPushRunMetadataKey(markerID),
+	); err != nil {
+		if isUndefinedTable(err) {
+			return nil
+		}
+		return fmt.Errorf("clearing full push run marker: %w", err)
+	}
+	return nil
+}
+
 type batchResult struct {
 	ok               bool
 	sessions         int
@@ -1269,11 +1550,13 @@ func (s *Sync) pushBatch(
 	legacyMarkerMachines []string,
 	sessionUsageFingerprints map[string]string,
 	pushed *[]db.Session,
+	fullPushRunIdentity *fullPushIdentity,
 ) (batchResult, error) {
 	preloadComparisons := len(batch) > 0 && !full
 	result, err := s.pushBatchAttempt(
 		ctx, batch, full, markerID, legacyMarkerMachines,
 		sessionUsageFingerprints, pushed, preloadComparisons,
+		fullPushRunIdentity,
 	)
 	if err == nil || !errors.Is(err, errPushComparisonPreload) {
 		return result, err
@@ -1286,6 +1569,7 @@ func (s *Sync) pushBatch(
 	return s.pushBatchAttempt(
 		ctx, batch, full, markerID, legacyMarkerMachines,
 		sessionUsageFingerprints, pushed, false,
+		fullPushRunIdentity,
 	)
 }
 
@@ -1298,6 +1582,7 @@ func (s *Sync) pushBatchAttempt(
 	sessionUsageFingerprints map[string]string,
 	pushed *[]db.Session,
 	preloadComparisons bool,
+	fullPushRunIdentity *fullPushIdentity,
 ) (batchResult, error) {
 	tx, err := s.pg.BeginTx(ctx, nil)
 	if err != nil {
@@ -1398,6 +1683,15 @@ func (s *Sync) pushBatchAttempt(
 		msgs += msgCount
 	}
 
+	if fullPushRunIdentity != nil && n > 0 {
+		if err := s.writeFullPushRunMarkerTx(
+			ctx, tx, *fullPushRunIdentity,
+		); err != nil {
+			_ = tx.Rollback()
+			*pushed = (*pushed)[:len(*pushed)-n]
+			return batchResult{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		log.Printf(
 			"pgsync: batch commit failed: %v", err,
