@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json/v2"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -3461,4 +3462,198 @@ func TestSessionProvenanceBackfillCompletesPerFilterScope(t *testing.T) {
 	require.NoError(t, err, "GetSyncState after unfiltered push")
 	assert.Equal(t, "1", marker,
 		"unfiltered push must complete the provenance marker")
+}
+
+func TestFullPushResumesCommittedBatchesAndRestartsAfterTargetReset(
+	t *testing.T,
+) {
+	pgURL := testPGURL(t)
+	const schema = "agentsview_full_push_resume_test"
+	cleanNamedPGSchema(t, pgURL, schema)
+	t.Cleanup(func() { cleanNamedPGSchema(t, pgURL, schema) })
+
+	ctx := context.Background()
+	local, err := db.Open(filepath.Join(t.TempDir(), "local.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, local.Close()) })
+
+	const sessionCount = 51
+	messages := make([]db.Message, 0, sessionCount)
+	for i := 0; i < sessionCount; i++ {
+		sessionID := fmt.Sprintf("session-%03d", i)
+		timestamp := time.Date(
+			2026, 8, 1, 0, 0, i, 0, time.UTC,
+		).Format(time.RFC3339)
+		require.NoError(t, local.UpsertSession(db.Session{
+			ID:               sessionID,
+			Project:          "project",
+			Machine:          "workstation",
+			Agent:            "codex",
+			MessageCount:     1,
+			UserMessageCount: 1,
+			CreatedAt:        timestamp,
+		}))
+		messages = append(messages, db.Message{
+			SessionID:     sessionID,
+			Ordinal:       1,
+			Role:          "user",
+			Content:       "original " + sessionID,
+			ContentLength: len("original " + sessionID),
+			Timestamp:     timestamp,
+		})
+	}
+	require.NoError(t, local.InsertMessages(messages))
+
+	sync1, err := New(
+		pgURL, schema, local, "workstation", true, SyncOptions{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sync1.Close()) })
+	require.NoError(t, sync1.EnsureSchema(ctx))
+
+	interruptAfterFirstBatch := false
+	firstCtx, cancelFirst := context.WithCancel(ctx)
+	firstResult, firstErr := sync1.PushWithOptions(
+		firstCtx, PushOptions{Full: true}, func(progress PushProgress) {
+			if !interruptAfterFirstBatch && progress.Phase == "" &&
+				progress.SessionsDone >= 50 {
+				interruptAfterFirstBatch = true
+				cancelFirst()
+			}
+		},
+	)
+	cancelFirst()
+	require.Error(t, firstErr)
+	assert.True(t, interruptAfterFirstBatch)
+	assert.Equal(t, 50, firstResult.SessionsPushed)
+
+	var pgSessions int
+	require.NoError(t, sync1.pg.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM sessions",
+	).Scan(&pgSessions))
+	assert.Equal(t, 50, pgSessions)
+
+	markerID, err := sync1.pushMarkerID()
+	require.NoError(t, err)
+	runMarkerKey := sync1.fullPushRunMetadataKey(markerID)
+	var runMarkerValue string
+	require.NoError(t, sync1.pg.QueryRowContext(ctx,
+		"SELECT value FROM sync_metadata WHERE key = $1", runMarkerKey,
+	).Scan(&runMarkerValue))
+	assert.NotEmpty(t, runMarkerValue)
+
+	regularMarkerKey := sync1.pushMarkerMetadataKey(
+		pushMarkerKeyPrefix, markerID,
+	)
+	_, regularMarkerExists, err := sync1.pgPushMarkerMetadataValue(
+		ctx, regularMarkerKey,
+	)
+	require.NoError(t, err)
+	assert.False(t, regularMarkerExists,
+		"completion marker must remain end-only during an interrupted push")
+
+	progressRaw, err := local.GetSyncState(fullPushProgressStateKey)
+	require.NoError(t, err)
+	var progress fullPushProgressState
+	require.NoError(t, json.Unmarshal([]byte(progressRaw), &progress))
+	assert.Len(t, progress.Fingerprints, 50)
+
+	var unchangedCTID string
+	require.NoError(t, sync1.pg.QueryRowContext(ctx, `
+		SELECT ctid::text FROM messages
+		WHERE session_id = 'session-001' AND ordinal = 1`,
+	).Scan(&unchangedCTID))
+	require.NoError(t, local.Update(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			UPDATE messages SET content = ?, content_length = ?
+			WHERE session_id = 'session-000' AND ordinal = 1`,
+			"changed session-000", len("changed session-000"),
+		)
+		return err
+	}))
+
+	require.NoError(t, sync1.Close())
+	sync2, err := New(
+		pgURL, schema, local, "workstation", true, SyncOptions{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sync2.Close()) })
+	require.NoError(t, sync2.EnsureSchema(ctx))
+	resumed, err := sync2.Push(ctx, false, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 2, resumed.SessionsPushed,
+		"only the changed committed session and the uncommitted session should be written")
+	assert.Zero(t, resumed.Errors)
+
+	var changedContent string
+	require.NoError(t, sync2.pg.QueryRowContext(ctx, `
+		SELECT content FROM messages
+		WHERE session_id = 'session-000' AND ordinal = 1`,
+	).Scan(&changedContent))
+	assert.Equal(t, "changed session-000", changedContent)
+	var uncommittedContent string
+	require.NoError(t, sync2.pg.QueryRowContext(ctx, `
+		SELECT content FROM messages
+		WHERE session_id = 'session-050' AND ordinal = 1`,
+	).Scan(&uncommittedContent))
+	assert.Equal(t, "original session-050", uncommittedContent)
+	var unchangedCTIDAfter string
+	require.NoError(t, sync2.pg.QueryRowContext(ctx, `
+		SELECT ctid::text FROM messages
+		WHERE session_id = 'session-001' AND ordinal = 1`,
+	).Scan(&unchangedCTIDAfter))
+	assert.Equal(t, unchangedCTID, unchangedCTIDAfter,
+		"unchanged committed sessions should be skipped on resume")
+	progressRaw, err = local.GetSyncState(fullPushProgressStateKey)
+	require.NoError(t, err)
+	assert.Empty(t, progressRaw)
+	_, runMarkerExists, err := sync2.pgPushMarkerMetadataValue(
+		ctx, sync2.fullPushRunMetadataKey(markerID),
+	)
+	require.NoError(t, err)
+	assert.False(t, runMarkerExists)
+
+	interruptAfterFirstBatch = false
+	secondCtx, cancelSecond := context.WithCancel(ctx)
+	secondResult, secondErr := sync2.PushWithOptions(
+		secondCtx, PushOptions{Full: true}, func(progress PushProgress) {
+			if !interruptAfterFirstBatch && progress.Phase == "" &&
+				progress.SessionsDone >= 50 {
+				interruptAfterFirstBatch = true
+				cancelSecond()
+			}
+		},
+	)
+	cancelSecond()
+	require.Error(t, secondErr)
+	assert.True(t, interruptAfterFirstBatch)
+	assert.Equal(t, 50, secondResult.SessionsPushed)
+	require.NoError(t, sync2.Close())
+
+	cleanNamedPGSchema(t, pgURL, schema)
+	sync3, err := New(
+		pgURL, schema, local, "workstation", true, SyncOptions{},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sync3.Close()) })
+	require.NoError(t, sync3.EnsureSchema(ctx))
+	afterReset, err := sync3.Push(ctx, false, nil)
+	require.NoError(t, err)
+	assert.Equal(t, sessionCount, afterReset.SessionsPushed,
+		"target reset must discard progress and repush every session")
+	assert.Zero(t, afterReset.Errors)
+	progressRaw, err = local.GetSyncState(fullPushProgressStateKey)
+	require.NoError(t, err)
+	assert.Empty(t, progressRaw)
+	_, runMarkerExists, err = sync3.pgPushMarkerMetadataValue(
+		ctx, sync3.fullPushRunMetadataKey(markerID),
+	)
+	require.NoError(t, err)
+	assert.False(t, runMarkerExists)
+	var finalContent string
+	require.NoError(t, sync3.pg.QueryRowContext(ctx, `
+		SELECT content FROM messages
+		WHERE session_id = 'session-000' AND ordinal = 1`,
+	).Scan(&finalContent))
+	assert.Equal(t, "changed session-000", finalContent)
 }

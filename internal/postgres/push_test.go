@@ -1471,6 +1471,35 @@ func TestFinalizePushStatePersistsEmptyBoundary(
 	assert.Empty(t, state.Fingerprints)
 }
 
+func TestFullPushProgressStateRoundTripAndIdentity(t *testing.T) {
+	identity := fullPushIdentity{
+		TargetFingerprint:        "target-fingerprint",
+		Scope:                    "target-scope",
+		SourceArchiveID:          "archive-id",
+		SourceDatabaseGeneration: "database-generation",
+		MarkerID:                 "marker-id",
+	}
+	progress := newFullPushProgressState(identity)
+	progress.Fingerprints["session-001"] = "fingerprint-001"
+	store := &syncStateStoreStub{}
+
+	require.NoError(t, persistFullPushProgressState(store, progress))
+	got, present, err := readFullPushProgressState(store)
+	require.NoError(t, err)
+	assert.True(t, present)
+	assert.True(t, got.matches(identity))
+	assert.Equal(t, "fingerprint-001", got.Fingerprints["session-001"])
+
+	changedIdentity := identity
+	changedIdentity.SourceDatabaseGeneration = "new-generation"
+	assert.False(t, got.matches(changedIdentity))
+
+	require.NoError(t, clearFullPushProgressState(store))
+	_, present, err = readFullPushProgressState(store)
+	require.NoError(t, err)
+	assert.False(t, present)
+}
+
 func TestFinalizeUnfilteredPushStatePreservesPriorFingerprintsWithoutPushedSessions(
 	t *testing.T,
 ) {
