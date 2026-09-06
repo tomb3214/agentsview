@@ -2,6 +2,7 @@ package importer
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -282,8 +283,8 @@ func (a *assetResolverAdapter) Copy(
 
 // ImportChatGPT reads a ChatGPT export directory (containing
 // conversations-*.json files) and imports each conversation into
-// the store. Existing sessions are skipped to preserve archived
-// data.
+// the store. Repeated exports append unseen messages while retaining
+// previously archived branches and message revisions.
 func ImportChatGPT(
 	ctx context.Context,
 	store db.Store,
@@ -336,22 +337,6 @@ func ImportChatGPT(
 				cb.progress(stats)
 				return nil
 			}
-			if existing != nil {
-				// Refresh session_name without touching any other fields —
-				// a partial UpsertSession would overwrite first_message,
-				// timestamps, and counts with zero values.
-				if localDB, ok := store.(*db.DB); ok {
-					if err := localDB.RefreshSessionName(s.ID, db.ParsedSessionName(s)); err != nil {
-						stats.Errors++
-						log.Printf("import: refreshing session_name for %s: %v", s.ID, err)
-						cb.progress(stats)
-						return nil
-					}
-				}
-				stats.Skipped++
-				cb.progress(stats)
-				return nil
-			}
 
 			sess := db.Session{
 				ID:               s.ID,
@@ -366,29 +351,14 @@ func ImportChatGPT(
 			}
 			db.ApplyParsedSessionIdentity(&sess, s)
 
-			if err := store.UpsertSession(sess); err != nil {
-				if errors.Is(err, db.ErrSessionExcluded) {
-					stats.Skipped++
-					cb.progress(stats)
-					return nil
-				}
-				stats.Errors++
-				log.Printf(
-					"import: skipping %s: %v", s.ID, err,
-				)
-				cb.progress(stats)
-				return nil
-			}
-
-			fts.suspend()
-
 			msgs := make([]db.Message, len(result.Messages))
 			for i, m := range result.Messages {
 				msgs[i] = db.Message{
-					SessionID: s.ID,
-					Ordinal:   m.Ordinal,
-					Role:      string(m.Role),
-					Content:   m.Content,
+					SessionID:  s.ID,
+					SourceUUID: m.SourceUUID,
+					Ordinal:    m.Ordinal,
+					Role:       string(m.Role),
+					Content:    m.Content,
 					Timestamp: m.Timestamp.UTC().Format(
 						time.RFC3339Nano,
 					),
@@ -403,19 +373,51 @@ func ImportChatGPT(
 				}
 			}
 
-			if err := store.ReplaceSessionMessages(
-				s.ID, msgs,
-			); err != nil {
+			if existing != nil {
+				archived, err := store.GetAllMessages(ctx, s.ID)
+				if err != nil {
+					return fmt.Errorf("loading archived messages: %w", err)
+				}
+				msgs = mergeChatGPTMessages(archived, msgs)
+				if len(msgs) == len(archived) {
+					if localDB, ok := store.(*db.DB); ok {
+						if err := localDB.RefreshSessionName(s.ID, sess.SessionName); err != nil {
+							return err
+						}
+					}
+					stats.Skipped++
+					cb.progress(stats)
+					return nil
+				}
+				name, end := sess.SessionName, sess.EndedAt
+				sess = *existing
+				sess.SessionName = name
+				if end != nil && (sess.EndedAt == nil || *end > *sess.EndedAt) {
+					sess.EndedAt = end
+				}
+			}
+			sess.MessageCount = len(msgs)
+			sess.UserMessageCount = 0
+			for _, m := range msgs {
+				if m.Role == "user" && !m.IsSystem {
+					sess.UserMessageCount++
+				}
+			}
+			fts.suspend()
+			written, err := store.WriteSessionBatchAtomic([]db.SessionBatchWrite{{
+				Session: sess, Messages: msgs, ReplaceMessages: true, SkipSignalUpdates: true,
+			}})
+			if errors.Is(err, db.ErrSessionExcluded) || written.ExcludedSessions > 0 {
+				stats.Skipped++
+			} else if err != nil {
 				stats.Errors++
-				log.Printf(
-					"import: skipping messages for %s: %v",
-					s.ID, err,
-				)
-				cb.progress(stats)
-				return nil
+				log.Printf("import: skipping %s: %v", s.ID, err)
+			} else if existing != nil {
+				stats.Updated++
+			} else {
+				stats.Imported++
 			}
 
-			stats.Imported++
 			cb.progress(stats)
 			return nil
 		},
@@ -423,6 +425,48 @@ func ImportChatGPT(
 
 	retErr = err
 	return
+}
+
+// Preserve archive order, including branches absent from the latest export.
+// Consume matches once so repeated equal messages remain distinct. Older
+// imports have no source UUID; match those by their complete exported content.
+func mergeChatGPTMessages(archived, incoming []db.Message) []db.Message {
+	counts := make(map[string]int)
+	for _, m := range archived {
+		counts[chatGPTMessageKey(m, m.SourceUUID)]++
+	}
+	merged := append([]db.Message(nil), archived...)
+	next := 0
+	for _, m := range archived {
+		if m.Ordinal >= next {
+			next = m.Ordinal + 1
+		}
+	}
+	for _, m := range incoming {
+		db.SanitizeMessage(&m)
+		key := chatGPTMessageKey(m, m.SourceUUID)
+		legacy := chatGPTMessageKey(m, "")
+		if counts[key] > 0 {
+			counts[key]--
+			continue
+		}
+		if m.SourceUUID != "" && counts[legacy] > 0 {
+			counts[legacy]--
+			continue
+		}
+		m.Ordinal = next
+		next++
+		merged = append(merged, m)
+	}
+	return merged
+}
+
+func chatGPTMessageKey(m db.Message, uuid string) string {
+	m.ID, m.Ordinal = 0, 0
+	m.SourceUUID = uuid
+	// Tool database IDs and call indices are excluded by their JSON tags.
+	b, _ := json.Marshal(m)
+	return string(b)
 }
 
 func resolvedImportMachine(current string, override []string) string {

@@ -1252,13 +1252,16 @@ add an archived or maintained mirror without replacing the original identity.
 - **Evidence:** `documentation`.
 - **Upstream:** OpenAI's first-party
   [ChatGPT data export instructions](https://help.openai.com/en/articles/7260999-how-do-i-export-my-chatgpt-history-and-data)
-  were checked 2026-07-19. The help page does not publish a versioned JSON
+  were checked 2026-09-06. The help page does not publish a versioned JSON
   schema.
 - **Usage and cost:** Export messages may include `model_slug`, but the artifact
   does not provide authoritative token, cache, reasoning, credit, or cost
   data.
 - **Agentsview:** `internal/parser/chatgpt.go`; graph ancestry is flattened for
-  display and the importer does not claim billing completeness.
+  display. The importer retains previously imported branches when refreshing
+  an active branch, using exported message IDs with content matching for legacy
+  rows. Source ZIPs remain unchanged. This does not import all unselected DAG
+  branches or claim billing completeness.
 
 ## Kiro CLI (`kiro`)
 
