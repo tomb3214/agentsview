@@ -21,9 +21,14 @@ to your local database alongside your agent coding sessions.
 
 1. Go to [chatgpt.com/settings](https://chatgpt.com/settings)
 2. Under **Data controls**, click **Export data**
-3. ChatGPT emails you a download link for a `.zip` file
-   containing conversation data and any images you uploaded
-   or generated with DALL-E
+3. Download the ZIP from the email or SMS while signed in to the same account.
+   The link expires after 24 hours; preparation can take up to 7 days.
+4. Keep the original ZIP and check it contains the conversations you need.
+
+This owner-requested route is documented by
+[OpenAI](https://help.openai.com/en/articles/7260999-how-do-i-export-my-chatgpt-history-and-data).
+An export cannot recover deleted chats. Listing conversations through an app
+is not a documented complete-history export route.
 
 ### Gemini Apps
 
@@ -133,8 +138,13 @@ You can safely re-import the same export file:
 
 - **Claude.ai** — existing sessions are updated with any
   new messages. User-edited display names are preserved.
-- **ChatGPT** — existing sessions are skipped (not
-  re-imported), so your data stays unchanged.
+- **ChatGPT** — unseen messages from the exported active branch are appended
+  to the archived conversation. Previously imported branches and earlier message
+  content remain searchable, even when absent from a later export. Archive order
+  is retained, so alternative branches appear after earlier imported messages.
+  Identical exports are skipped; titles refresh and user-edited names survive.
+  Original exports are read without modification; retain them separately.
+  Branches never selected in an imported export are not added by this importer.
 - **Gemini Apps** — existing sessions are matched by the canonical UTC
   timestamp and its zero-based occurrence among records sharing that
   timestamp. Inserting or reordering records with other timestamps doesn't

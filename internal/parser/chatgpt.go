@@ -280,6 +280,7 @@ func buildChatGPTMessages(
 		case "user":
 			pm := ParsedMessage{
 				Ordinal:       ordinal,
+				SourceUUID:    msg.ID,
 				Role:          RoleUser,
 				Content:       content,
 				Timestamp:     unixFloatToTime(msg.CreateTime),
@@ -293,6 +294,7 @@ func buildChatGPTMessages(
 			hasThinking := msg.Content.ContentType == "thoughts"
 			pm := ParsedMessage{
 				Ordinal:       ordinal,
+				SourceUUID:    msg.ID,
 				Role:          RoleAssistant,
 				Content:       content,
 				Timestamp:     unixFloatToTime(msg.CreateTime),
@@ -307,6 +309,7 @@ func buildChatGPTMessages(
 		case "system":
 			pm := ParsedMessage{
 				Ordinal:       ordinal,
+				SourceUUID:    msg.ID,
 				Role:          RoleAssistant,
 				Content:       content,
 				Timestamp:     unixFloatToTime(msg.CreateTime),
