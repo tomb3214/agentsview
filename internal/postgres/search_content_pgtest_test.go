@@ -599,70 +599,49 @@ func TestPGContentSearchTrigramIndex(t *testing.T) {
 	assert.True(t, hasIdx,
 		"idx_messages_content_trgm missing after EnsureSchema")
 
-	// fastupdate=off must be set so the pending list cannot grow
-	// unbounded under continuous ingest. The schema bootstrap applies
-	// this on every boot (including stores upgraded from an earlier
-	// schema that created the index with the default fastupdate=on).
-	var fastupdateOff bool
-	require.NoError(t, store.DB().QueryRowContext(ctx,
-		`SELECT EXISTS (
-			SELECT 1
-			  FROM pg_class c
-			  JOIN pg_namespace n ON n.oid = c.relnamespace
-			 WHERE n.nspname = $1
-			   AND c.relname = 'idx_messages_content_trgm'
-			   AND 'fastupdate=off' = ANY(c.reloptions)
-		)`, contentSearchSchema,
-	).Scan(&fastupdateOff), "query pg_class.reloptions")
-	assert.True(t, fastupdateOff,
-		"idx_messages_content_trgm must have fastupdate=off")
+	// Newly created indexes keep the default policy and are usable.
+	for _, name := range []string{
+		"idx_messages_content_trgm", "idx_tool_calls_input_trgm",
+		"idx_tool_calls_result_trgm", "idx_tool_result_events_content_trgm",
+	} {
+		var off, valid, ready bool
+		require.NoError(t, store.DB().QueryRowContext(ctx,
+			`SELECT 'fastupdate=off' = ANY(c.reloptions), i.indisvalid, i.indisready
+			 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+			 JOIN pg_index i ON i.indexrelid = c.oid
+			 WHERE n.nspname = $1 AND c.relname = $2`, contentSearchSchema, name,
+		).Scan(&off, &valid, &ready), name)
+		assert.True(t, off, "%s defaults to fastupdate=off", name)
+		assert.True(t, valid, "%s is valid", name)
+		assert.True(t, ready, "%s is ready", name)
+	}
 }
 
-// TestPGContentSearchTrigramIndexUpgrade verifies the upgrade path: a store
-// whose trigram index was created by an earlier schema with the default
-// fastupdate=on gets fastupdate=off reapplied on the next EnsureSchema run.
-func TestPGContentSearchTrigramIndexUpgrade(t *testing.T) {
+// Existing indexes may have administrator-selected write policies.
+func TestPGContentSearchTrigramIndexPreservesOptions(t *testing.T) {
 	store := setupContentSearch(t)
 	ctx := context.Background()
-
-	hasFastupdateOff := func() bool {
-		var off bool
-		require.NoError(t, store.DB().QueryRowContext(ctx,
-			`SELECT EXISTS (
-				SELECT 1
-				  FROM pg_class c
-				  JOIN pg_namespace n ON n.oid = c.relnamespace
-				 WHERE n.nspname = $1
-				   AND c.relname = 'idx_messages_content_trgm'
-				   AND 'fastupdate=off' = ANY(c.reloptions)
-			)`, contentSearchSchema,
-		).Scan(&off), "query pg_class.reloptions")
-		return off
+	indexes := []string{"idx_tool_calls_input_trgm", "idx_tool_calls_result_trgm"}
+	for _, name := range indexes {
+		_, err := store.DB().ExecContext(ctx,
+			"ALTER INDEX "+name+" SET (fastupdate = on)")
+		require.NoError(t, err, "tune %s", name)
 	}
-
-	var hasIdx bool
-	require.NoError(t, store.DB().QueryRowContext(ctx,
-		`SELECT EXISTS (
-			SELECT 1 FROM pg_indexes
-			WHERE schemaname = $1 AND indexname = 'idx_messages_content_trgm'
-		)`, contentSearchSchema,
-	).Scan(&hasIdx), "query pg_indexes")
-	if !hasIdx {
-		t.Skip("trigram index not created on this instance; index is best-effort")
-	}
-
-	// Simulate an index left behind by the pre-#606 schema, which created
-	// it with the PostgreSQL default fastupdate=on.
-	_, err := store.DB().ExecContext(ctx,
-		`ALTER INDEX idx_messages_content_trgm SET (fastupdate = on)`)
-	require.NoError(t, err, "reset index to fastupdate=on")
-	require.False(t, hasFastupdateOff(),
-		"precondition: index should report fastupdate=on")
 
 	require.NoError(t, EnsureSchema(ctx, store.DB(), contentSearchSchema),
 		"rerun EnsureSchema")
-	assert.True(t, hasFastupdateOff(),
-		"EnsureSchema must reapply fastupdate=off to a pre-existing index")
+	for _, name := range indexes {
+		var on, valid, ready bool
+		require.NoError(t, store.DB().QueryRowContext(ctx,
+			`SELECT 'fastupdate=on' = ANY(c.reloptions), i.indisvalid, i.indisready
+			 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+			 JOIN pg_index i ON i.indexrelid = c.oid
+			 WHERE n.nspname = $1 AND c.relname = $2`, contentSearchSchema, name,
+		).Scan(&on, &valid, &ready), name)
+		assert.True(t, on, "%s retains administrator-selected fastupdate=on", name)
+		assert.True(t, valid, "%s remains valid", name)
+		assert.True(t, ready, "%s remains ready", name)
+	}
 }
 
 // TestPGSearchContentRegex verifies regex mode.
