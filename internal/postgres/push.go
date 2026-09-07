@@ -577,7 +577,7 @@ func (s *Sync) PushWithOptions(
 		delete(priorFingerprints, id)
 	}
 
-	var pushed []db.Session
+	pushed := make([]db.Session, 0)
 	if len(priorFingerprints) > 0 {
 		for id, sess := range sessionByID {
 			if priorFingerprint, ok := priorFingerprints[id]; ok &&
