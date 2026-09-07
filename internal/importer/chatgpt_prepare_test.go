@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -46,7 +47,11 @@ func TestPrepareChatGPTAdmissionAndReplay(t *testing.T) {
 	require.Equal(t, string(original[0]), string(prepared[0]))
 	info, err := os.Stat(out)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0700), info.Mode().Perm())
+	require.True(t, info.IsDir())
+	// Windows mode bits do not represent POSIX directory permissions.
+	if runtime.GOOS != "windows" {
+		require.Equal(t, os.FileMode(0700), info.Mode().Perm())
+	}
 	d := testDB(t)
 	stats, err := ImportChatGPT(context.Background(), d, out, t.TempDir(), nil)
 	require.NoError(t, err)
