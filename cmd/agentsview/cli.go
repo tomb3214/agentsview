@@ -14,6 +14,7 @@ import (
 	"go.kenn.io/agentsview/internal/activity"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/importer"
 	"go.kenn.io/agentsview/internal/server"
 	"golang.org/x/term"
 )
@@ -447,6 +448,27 @@ func newTokenUseCommand() *cobra.Command {
 	}
 }
 
+func newPrepareChatGPTCommand() *cobra.Command {
+	var manifest, output string
+	cmd := &cobra.Command{
+		Use:   "prepare-chatgpt <export-directory>",
+		Short: "Prepare an explicitly admitted ChatGPT export without opening a database",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			receipt, err := importer.PrepareChatGPTExport(cmd.Context(), args[0], manifest, output)
+			if err != nil {
+				return err
+			}
+			return json.MarshalWrite(cmd.OutOrStdout(), receipt)
+		},
+	}
+	cmd.Flags().StringVar(&manifest, "manifest", "", "Admission manifest with exact shard hashes and verified conversation IDs")
+	cmd.Flags().StringVar(&output, "output", "", "New owner-private prepared export directory")
+	_ = cmd.MarkFlagRequired("manifest")
+	_ = cmd.MarkFlagRequired("output")
+	return cmd
+}
+
 func newImportCommand() *cobra.Command {
 	var importType string
 	cmd := &cobra.Command{
@@ -461,6 +483,7 @@ func newImportCommand() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&importType, "type", "", "Import type: claude-ai, chatgpt, gemini-apps")
 	_ = cmd.MarkFlagRequired("type")
+	cmd.AddCommand(newPrepareChatGPTCommand())
 	return cmd
 }
 
