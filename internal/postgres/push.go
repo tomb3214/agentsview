@@ -2970,6 +2970,27 @@ func (s *Sync) pushMessages(
 		}
 	}
 
+	// Tool results reference the session and logical ordinal/call keys;
+	// they do not cascade from message rows. Preserve them when a message
+	// append or another dependency changes but the exact event set does not.
+	var localResultFP, pgResultFP string
+	preserveResults := false
+	if !full {
+		localResultFP, err = localToolResultEventPGFingerprint(s.local, sessionID)
+		if err != nil {
+			return 0, fmt.Errorf("computing local tool_result_event fingerprint: %w", err)
+		}
+		if comparisons != nil {
+			pgResultFP = comparisons.ToolResultFingerprint[sessionID]
+		} else {
+			pgResultFP, err = pgToolResultEventFingerprint(ctx, tx, sessionID)
+			if err != nil {
+				return 0, fmt.Errorf("computing pg tool_result_event fingerprint: %w", err)
+			}
+		}
+		preserveResults = localResultFP == pgResultFP
+	}
+
 	if !full && pgAgg.Count == localCount && pgAgg.Count > 0 {
 		localFP := pushLocalMessageFingerprint{}
 
@@ -3034,14 +3055,7 @@ func (s *Sync) pushMessages(
 				"computing local tool_call fingerprint: %w", err,
 			)
 		}
-		localFP.ToolResultFP, err = localToolResultEventPGFingerprint(
-			s.local, sessionID,
-		)
-		if err != nil {
-			return 0, fmt.Errorf(
-				"computing local tool_result_event fingerprint: %w", err,
-			)
-		}
+		localFP.ToolResultFP = localResultFP
 		localFP.TokenFP, err = s.local.MessageTokenFingerprint(sessionID)
 		if err != nil {
 			return 0, fmt.Errorf(
@@ -3106,13 +3120,6 @@ func (s *Sync) pushMessages(
 					err,
 				)
 			}
-			pgResultFP, err := pgToolResultEventFingerprint(ctx, tx, sessionID)
-			if err != nil {
-				return 0, fmt.Errorf(
-					"computing pg tool_result_event fingerprint: %w",
-					err,
-				)
-			}
 			pgUsageFP, err := pgUsageEventFingerprint(ctx, tx, sessionID)
 			if err != nil {
 				return 0, fmt.Errorf(
@@ -3150,13 +3157,15 @@ func (s *Sync) pushMessages(
 	if err != nil {
 		return 0, err
 	}
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM tool_result_events
-		WHERE session_id = $1
-	`, sessionID); err != nil {
-		return 0, fmt.Errorf(
-			"deleting pg tool_result_events: %w", err,
-		)
+	if !preserveResults {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM tool_result_events
+			WHERE session_id = $1
+		`, sessionID); err != nil {
+			return 0, fmt.Errorf(
+				"deleting pg tool_result_events: %w", err,
+			)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM tool_calls
@@ -3214,10 +3223,12 @@ func (s *Sync) pushMessages(
 		); err != nil {
 			return count, err
 		}
-		if err := bulkInsertToolResultEvents(
-			ctx, tx, sessionID, msgs,
-		); err != nil {
-			return count, err
+		if !preserveResults {
+			if err := bulkInsertToolResultEvents(
+				ctx, tx, sessionID, msgs,
+			); err != nil {
+				return count, err
+			}
 		}
 		count += len(msgs)
 		startOrdinal = nextOrdinal
