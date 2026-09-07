@@ -43,7 +43,7 @@ func readPreparationFile(root, name string) ([]byte, error) {
 		return nil, fmt.Errorf("non-local source path")
 	}
 	path := root
-	for _, part := range strings.Split(name, string(filepath.Separator)) {
+	for part := range strings.SplitSeq(name, string(filepath.Separator)) {
 		path = filepath.Join(path, part)
 		info, err := os.Lstat(path)
 		if err != nil {
