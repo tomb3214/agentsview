@@ -8,6 +8,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -480,13 +481,11 @@ var buildAntigravityProjectMap = antigravityProjectMapFromHistory
 
 func buildAntigravityCLIProjectMap(root string) map[string]string {
 	out := buildAntigravityProjectMap(filepath.Join(root, "history.jsonl"))
-	for id, workspace := range antigravityProjectMapFromLastConversations(
+	// The cache is the current CLI's exact workspace -> conversation map.
+	// Prefer it when a legacy history row names the same conversation.
+	maps.Copy(out, antigravityProjectMapFromLastConversations(
 		filepath.Join(root, "cache", "last_conversations.json"),
-	) {
-		// The cache is the current CLI's exact workspace -> conversation map.
-		// Prefer it when a legacy history row names the same conversation.
-		out[id] = workspace
-	}
+	))
 	return out
 }
 

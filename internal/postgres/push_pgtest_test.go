@@ -3142,8 +3142,10 @@ func TestArchiveIdentityChangeRepublishesUnchangedSessions(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = syncer.Push(ctx, false, nil)
+	failed, err := syncer.Push(ctx, false, nil)
 	require.ErrorContains(t, err, "archive salt mismatch")
+	require.Equal(t, 1, failed.SessionsPushed,
+		"session batch commits before archive metadata publication fails")
 	persistedArchiveID, err := localDB.GetSyncState(lastPushSourceArchiveIDKey)
 	require.NoError(t, err)
 	assert.Equal(t, oldArchiveID, persistedArchiveID,
@@ -3156,7 +3158,8 @@ func TestArchiveIdentityChangeRepublishesUnchangedSessions(t *testing.T) {
 
 	second, err := syncer.Push(ctx, false, nil)
 	require.NoError(t, err)
-	assert.Equal(t, 1, second.SessionsPushed)
+	assert.Zero(t, second.SessionsPushed,
+		"retry resumes the committed session batch and completes metadata publication")
 	var gotArchiveID string
 	require.NoError(t, pg.QueryRowContext(ctx, `
 		SELECT source_archive_id FROM sessions WHERE id = 'sess-1'`,

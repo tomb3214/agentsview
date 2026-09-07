@@ -325,6 +325,7 @@ func TestEarliestAntigravityTimestamp(t *testing.T) {
 
 func TestAntigravityCLIDiscoverAndParse(t *testing.T) {
 	root := t.TempDir()
+	workspace := filepath.Join(root, "proj")
 	id := "11111111-2222-3333-4444-555555555555"
 
 	mustMkdir(t, filepath.Join(root, "conversations"))
@@ -347,15 +348,23 @@ func TestAntigravityCLIDiscoverAndParse(t *testing.T) {
 		}`))
 
 	// history.jsonl: one row for our session, one for another
+	historyRow, err := json.Marshal(map[string]any{
+		"display": "hello world", "timestamp": int64(1779000000000),
+		"workspace": workspace, "conversationId": id,
+	})
+	require.NoError(t, err)
+	otherRow, err := json.Marshal(map[string]any{
+		"display": "other", "timestamp": int64(1779000001000),
+		"workspace": filepath.Join(root, "x"), "conversationId": "other-id",
+	})
+	require.NoError(t, err)
 	mustWrite(t, filepath.Join(root, "history.jsonl"),
-		[]byte(`{"display":"hello world","timestamp":1779000000000,`+
-			`"workspace":"/tmp/proj","conversationId":"`+id+`"}
-{"display":"other","timestamp":1779000001000,"workspace":"/tmp/x","conversationId":"other-id"}`))
+		append(append(historyRow, '\n'), otherRow...))
 
 	// Discovery should return the .pb with the right project.
 	files := discoverAntigravityCLITestSessions(t, root)
 	require.Len(t, files, 1, "discover")
-	assert.Equal(t, "/tmp/proj", files[0].Project, "project")
+	assert.Equal(t, workspace, files[0].Project, "project")
 
 	// Find by id should locate the same .pb.
 	assert.Equal(t, files[0].Path, findAntigravityCLITestSourceFile(t, root, id), "find")
@@ -374,7 +383,7 @@ func TestAntigravityCLIDiscoverAndParse(t *testing.T) {
 	sess := &outcome.Results[0].Result.Session
 	msgs := outcome.Results[0].Result.Messages
 	assert.Equal(t, "antigravity-cli:"+id, sess.ID)
-	assert.Equal(t, "/tmp/proj", sess.Cwd)
+	assert.Equal(t, workspace, sess.Cwd)
 	// One user message from history + one assistant from brain.
 	require.Len(t, msgs, 2)
 	assert.Equal(t, RoleUser, msgs[0].Role)
@@ -402,9 +411,12 @@ func TestAntigravityCLIDiscoverAndParseDB(t *testing.T) {
 	createAntigravityTestDB(t, dbPath)
 	mustWrite(t, filepath.Join(root, "conversations", id+".pb"),
 		[]byte("old-encrypted-placeholder"))
-	mustWrite(t, filepath.Join(root, "history.jsonl"),
-		[]byte(`{"display":"db prompt fallback","timestamp":1779000000000,`+
-			`"workspace":"`+workspace+`","conversationId":"`+id+`"}`))
+	historyRow, err := json.Marshal(map[string]any{
+		"display": "db prompt fallback", "timestamp": int64(1779000000000),
+		"workspace": workspace, "conversationId": id,
+	})
+	require.NoError(t, err)
+	mustWrite(t, filepath.Join(root, "history.jsonl"), historyRow)
 
 	files := discoverAntigravityCLITestSessions(t, root)
 	require.Len(t, files, 1, "discover")
@@ -444,8 +456,12 @@ func TestAntigravityCLIProjectFallbackPromptAndProximity(t *testing.T) {
 	createAntigravityTestDB(t, dbPath) // user prompt: "user prompt text goes here", ts: 1779000000
 
 	// Create history.jsonl with a row omitting conversationId, matching text, and close timestamp (1779000000000 ms)
-	mustWrite(t, filepath.Join(root, "history.jsonl"),
-		[]byte(`{"display":"  user prompt text goes here  ","timestamp":1779000010000,"workspace":"`+workspace+`"}`))
+	historyRow, err := json.Marshal(map[string]any{
+		"display": "  user prompt text goes here  ", "timestamp": int64(1779000010000),
+		"workspace": workspace,
+	})
+	require.NoError(t, err)
+	mustWrite(t, filepath.Join(root, "history.jsonl"), historyRow)
 
 	sess, msgs, err := parseAntigravityCLITestSession(t, dbPath, "", "m")
 	require.NoError(t, err)

@@ -2,6 +2,7 @@ package parser
 
 import (
 	"context"
+	"encoding/json/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -288,7 +289,9 @@ func TestAntigravityCLIProviderUsesLastConversationsWorkspace(t *testing.T) {
 	mustMkdir(t, workspace)
 	cachePath := filepath.Join(root, "cache", "last_conversations.json")
 	require.NoError(t, os.MkdirAll(filepath.Dir(cachePath), 0o755))
-	mustWrite(t, cachePath, []byte(`{"`+workspace+`":"`+id+`"}`))
+	cacheJSON, err := json.Marshal(map[string]string{workspace: id})
+	require.NoError(t, err)
+	mustWrite(t, cachePath, cacheJSON)
 
 	provider, ok := NewProvider(AgentAntigravityCLI, ProviderConfig{
 		Roots: []string{root}, Machine: "devbox",
@@ -314,7 +317,9 @@ func TestAntigravityCLIProviderUsesLastConversationsWorkspace(t *testing.T) {
 
 	workspace2 := filepath.Join(root, "cache-proj-2")
 	mustMkdir(t, workspace2)
-	mustWrite(t, cachePath, []byte(`{"`+workspace2+`":"`+id+`"}`))
+	cacheJSON, err = json.Marshal(map[string]string{workspace2: id})
+	require.NoError(t, err)
+	mustWrite(t, cachePath, cacheJSON)
 	changed, err := provider.SourcesForChangedPath(
 		context.Background(), ChangedPathRequest{Path: cachePath, EventKind: "write"},
 	)
