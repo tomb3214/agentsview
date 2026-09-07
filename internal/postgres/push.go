@@ -64,6 +64,7 @@ type fullPushIdentity struct {
 	SourceArchiveID          string `json:"source_archive_id"`
 	SourceDatabaseGeneration string `json:"source_database_generation"`
 	MarkerID                 string `json:"marker_id"`
+	CompareMessages          bool   `json:"compare_messages,omitzero"`
 }
 
 type fullPushProgressState struct {
@@ -287,6 +288,9 @@ func (s *Sync) PushWithOptions(
 	legacyMarkerMachines := pushMarkerLegacyMachines(
 		markerMachine, markerMachineAliases,
 	)
+	// Metadata backfills need every session visited, but only explicit full
+	// requests and recovery require replacing an already matching transcript.
+	replaceMessages := full
 	var reconciledScopeMoveIDs []string
 	var identityRefreshSessionIDs []string
 	// Keep the backfill marker scoped to target only; all other push
@@ -349,6 +353,7 @@ func (s *Sync) PushWithOptions(
 			)
 			lastPush = ""
 			full = true
+			replaceMessages = true
 			if len(legacyMarkerMachines) == 0 {
 				legacyMarkerMachines = nil
 			}
@@ -370,6 +375,7 @@ func (s *Sync) PushWithOptions(
 			}
 		}
 	}
+	pushIdentity.CompareMessages = !replaceMessages
 	var fullPushProgress *fullPushProgressState
 	storedFullPushProgress, progressPresent, err :=
 		readFullPushProgressState(state)
@@ -377,6 +383,13 @@ func (s *Sync) PushWithOptions(
 		return result, err
 	}
 	if progressPresent {
+		// Resume the stronger replacement contract, including legacy checkpoints
+		// without this field. An explicit full request cannot reuse a checkpoint
+		// that only compared matching transcripts.
+		if !storedFullPushProgress.CompareMessages {
+			replaceMessages = true
+			pushIdentity.CompareMessages = false
+		}
 		runMarkerMatches, err := s.fullPushRunMarkerMatches(
 			ctx, pushIdentity,
 		)
@@ -392,6 +405,8 @@ func (s *Sync) PushWithOptions(
 				return result, err
 			}
 			full = true
+			replaceMessages = true
+			pushIdentity.CompareMessages = false
 		} else {
 			log.Printf(
 				"pgsync: resuming full push with %d committed session(s)",
@@ -721,7 +736,7 @@ func (s *Sync) PushWithOptions(
 
 		batchPushedStart := len(pushed)
 		batchResult, err := s.pushBatch(
-			ctx, batch, full, markerID, legacyMarkerMachines,
+			ctx, batch, replaceMessages, markerID, legacyMarkerMachines,
 			usageFingerprints, &pushed, fullPushRunIdentity,
 		)
 		if err != nil {
@@ -746,7 +761,7 @@ func (s *Sync) PushWithOptions(
 				sessionPushedStart := len(pushed)
 				sr, retryErr := s.pushBatch(
 					ctx, []db.Session{sess},
-					full, markerID, legacyMarkerMachines,
+					replaceMessages, markerID, legacyMarkerMachines,
 					usageFingerprints, &pushed, fullPushRunIdentity,
 				)
 				if retryErr != nil {
