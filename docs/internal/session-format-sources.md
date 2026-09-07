@@ -1262,6 +1262,9 @@ add an archived or maintained mirror without replacing the original identity.
   an active branch, using exported message IDs with content matching for legacy
   rows. Source ZIPs remain unchanged. This does not import all unselected DAG
   branches or claim billing completeness.
+- **Admission preparation:** `import prepare-chatgpt` binds explicit conversation
+  IDs to exact export shard hashes before database access. Selected raw mappings
+  retain all branches; this does not expand the searchable ancestry scope.
 
 ## Kiro CLI (`kiro`)
 
