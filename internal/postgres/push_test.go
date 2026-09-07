@@ -1494,6 +1494,19 @@ func TestFullPushProgressStateRoundTripAndIdentity(t *testing.T) {
 	changedIdentity.SourceDatabaseGeneration = "new-generation"
 	assert.False(t, got.matches(changedIdentity))
 
+	assert.NotContains(t, store.values[fullPushProgressStateKey], "compare_messages",
+		"legacy checkpoint encoding retains forced replacement by default")
+	compareIdentity := identity
+	compareIdentity.CompareMessages = true
+	assert.False(t, got.matches(compareIdentity))
+	compareProgress := newFullPushProgressState(compareIdentity)
+	require.NoError(t, persistFullPushProgressState(store, compareProgress))
+	got, present, err = readFullPushProgressState(store)
+	require.NoError(t, err)
+	assert.True(t, present)
+	assert.True(t, got.matches(compareIdentity))
+	assert.False(t, got.matches(identity))
+
 	require.NoError(t, clearFullPushProgressState(store))
 	_, present, err = readFullPushProgressState(store)
 	require.NoError(t, err)
