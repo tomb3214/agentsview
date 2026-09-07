@@ -3,6 +3,7 @@ package sync_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json/v2"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,8 +45,13 @@ func TestSyncEngineAntigravityCLI_HappyPath(t *testing.T) {
 	require.NoError(t, os.MkdirAll(convDir, 0o755))
 
 	// Write history.jsonl to map the project
-	historyLine := `{"conversationId": "` + uuid + `", "workspace": "/home/user/my-cli-project", "timestamp": 1716244800000, "display": "Initial Prompt"}` + "\n"
-	require.NoError(t, os.WriteFile(filepath.Join(env.antigravityCLIDir, "history.jsonl"), []byte(historyLine), 0o644))
+	workspace := filepath.Join(t.TempDir(), "my-cli-project")
+	historyLine, err := json.Marshal(map[string]any{
+		"conversationId": uuid, "workspace": workspace,
+		"timestamp": int64(1716244800000), "display": "Initial Prompt",
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(env.antigravityCLIDir, "history.jsonl"), historyLine, 0o644))
 
 	// Write .pb file
 	pbPath := filepath.Join(convDir, uuid+".pb")
@@ -109,7 +115,10 @@ func TestSyncEngineAntigravityCLI_HappyPath(t *testing.T) {
 	assert.Equal(t, 1, stats.Synced)
 
 	// Verify database ingestion
-	assertSessionProject(t, env.db, "antigravity-cli:"+uuid, "/home/user/my-cli-project")
+	assertSessionProject(t, env.db, "antigravity-cli:"+uuid, "my_cli_project")
+	assertSessionState(t, env.db, "antigravity-cli:"+uuid, func(sess *db.Session) {
+		assert.Equal(t, workspace, sess.Cwd)
+	})
 	// Expected messages:
 	// 1. User: "Check workspace status"
 	// 2. Assistant: "listing files now" (with tool calls and thoughts)
@@ -521,13 +530,13 @@ func writeAntigravityCLIInferredProjectFixture(
 	convDir := filepath.Join(env.antigravityCLIDir, "conversations")
 	require.NoError(t, os.MkdirAll(convDir, 0o755))
 
-	historyLine := fmt.Sprintf(
-		`{"workspace": %q, "timestamp": %d, "display": %q}`+"\n",
-		workspace, rowTime.UnixMilli(), display,
-	)
+	historyLine, err := json.Marshal(map[string]any{
+		"workspace": workspace, "timestamp": rowTime.UnixMilli(), "display": display,
+	})
+	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(
 		filepath.Join(env.antigravityCLIDir, "history.jsonl"),
-		[]byte(historyLine), 0o644,
+		historyLine, 0o644,
 	))
 
 	dbPath := filepath.Join(convDir, uuid+".db")
@@ -541,17 +550,19 @@ func TestSyncEngineAntigravityCLI_InferredProjectWithoutConversationID(t *testin
 	// leading/trailing/internal whitespace; only the normalized
 	// (lowercased, whitespace-collapsed) forms match.
 	const display = "  fix  THE Flux   Capacitor Bug "
-	const workspace = "/home/user/inferred-project"
+	workspace := filepath.Join(t.TempDir(), "inferred-project")
 
 	tests := []struct {
 		name        string
 		rowTime     time.Time
 		wantProject string
+		wantCwd     string
 	}{
 		{
 			name:        "normalized match within window infers project",
 			rowTime:     base.Add(10 * time.Second),
-			wantProject: workspace,
+			wantProject: "inferred_project",
+			wantCwd:     workspace,
 		},
 		{
 			name:        "match outside 60s window leaves project empty",
@@ -577,6 +588,9 @@ func TestSyncEngineAntigravityCLI_InferredProjectWithoutConversationID(t *testin
 			})
 
 			assertSessionProject(t, env.db, sessionID, tt.wantProject)
+			assertSessionState(t, env.db, sessionID, func(sess *db.Session) {
+				assert.Equal(t, tt.wantCwd, sess.Cwd)
+			})
 			assertSessionMessageCount(t, env.db, sessionID, 1)
 			msgs := fetchMessages(t, env.db, sessionID)
 			require.Len(t, msgs, 1)
@@ -591,16 +605,20 @@ func TestSyncSingleSessionAntigravityCLI_InferredProjectWithoutConversationID(t 
 	uuid := "cd34ef56-7777-8888-9999-aaaabbbbcccc"
 	sessionID := "antigravity-cli:" + uuid
 
+	workspace := filepath.Join(t.TempDir(), "inferred-project-single")
 	writeAntigravityCLIInferredProjectFixture(
 		t, env, uuid, "  fix  THE Flux   Capacitor Bug ",
-		"/home/user/inferred-project-single",
+		workspace,
 		base, base.Add(10*time.Second),
 	)
 
 	// The file-watcher path must persist the inferred project too.
 	require.NoError(t, env.engine.SyncSingleSession(sessionID))
 
-	assertSessionProject(t, env.db, sessionID, "/home/user/inferred-project-single")
+	assertSessionProject(t, env.db, sessionID, "inferred_project_single")
+	assertSessionState(t, env.db, sessionID, func(sess *db.Session) {
+		assert.Equal(t, workspace, sess.Cwd)
+	})
 	assertSessionMessageCount(t, env.db, sessionID, 1)
 }
 
@@ -625,17 +643,22 @@ func TestSyncPathsAntigravityCLIHistoryOnlyUpdateRefreshesProject(t *testing.T) 
 	})
 	assertSessionProject(t, env.db, sessionID, "")
 
+	workspace := filepath.Join(t.TempDir(), "history-arrived")
 	historyPath := filepath.Join(env.antigravityCLIDir, "history.jsonl")
-	historyLine := fmt.Sprintf(
-		`{"conversationId": %q, "workspace": "/home/user/history-arrived", "timestamp": %d, "display": "History arrives later"}`+"\n",
-		uuid, late.UnixMilli(),
-	)
-	require.NoError(t, os.WriteFile(historyPath, []byte(historyLine), 0o644))
+	historyLine, err := json.Marshal(map[string]any{
+		"conversationId": uuid, "workspace": workspace,
+		"timestamp": late.UnixMilli(), "display": "History arrives later",
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(historyPath, historyLine, 0o644))
 	require.NoError(t, os.Chtimes(historyPath, late, late))
 
 	env.engine.SyncPaths([]string{historyPath})
 
-	assertSessionProject(t, env.db, sessionID, "/home/user/history-arrived")
+	assertSessionProject(t, env.db, sessionID, "history_arrived")
+	assertSessionState(t, env.db, sessionID, func(sess *db.Session) {
+		assert.Equal(t, workspace, sess.Cwd)
+	})
 	assertSessionMessageCount(t, env.db, sessionID, 1)
 }
 
@@ -657,15 +680,23 @@ func TestSyncPathsAntigravityCLIHistoryRetagClearsRemovedProject(t *testing.T) {
 		createAntigravityCLIDisplayStepDB(t, dbPath, prompt)
 		require.NoError(t, os.Chtimes(dbPath, base, base))
 	}
+	workspaceRoot := t.TempDir()
+	removedWorkspace := filepath.Join(workspaceRoot, "removed")
+	retaggedWorkspace := filepath.Join(workspaceRoot, "retagged")
+	updatedWorkspace := filepath.Join(workspaceRoot, "retagged-now")
 	historyPath := filepath.Join(env.antigravityCLIDir, "history.jsonl")
-	initialHistory := fmt.Sprintf(
-		`{"conversationId": %q, "workspace": "/home/user/removed", "timestamp": %d, "display": "Original history prompt"}`+"\n",
-		removedID, base.UnixMilli(),
-	) + fmt.Sprintf(
-		`{"conversationId": %q, "workspace": "/home/user/retagged", "timestamp": %d, "display": "Retagged history prompt"}`+"\n",
-		retaggedID, base.UnixMilli(),
-	)
-	require.NoError(t, os.WriteFile(historyPath, []byte(initialHistory), 0o644))
+	removedRow, err := json.Marshal(map[string]any{
+		"conversationId": removedID, "workspace": removedWorkspace,
+		"timestamp": base.UnixMilli(), "display": "Original history prompt",
+	})
+	require.NoError(t, err)
+	retaggedRow, err := json.Marshal(map[string]any{
+		"conversationId": retaggedID, "workspace": retaggedWorkspace,
+		"timestamp": base.UnixMilli(), "display": "Retagged history prompt",
+	})
+	require.NoError(t, err)
+	initialHistory := append(append(removedRow, '\n'), retaggedRow...)
+	require.NoError(t, os.WriteFile(historyPath, initialHistory, 0o644))
 	require.NoError(t, os.Chtimes(historyPath, base, base))
 
 	runSyncAndAssert(t, env.engine, sync.SyncStats{
@@ -674,21 +705,34 @@ func TestSyncPathsAntigravityCLIHistoryRetagClearsRemovedProject(t *testing.T) {
 		Skipped:       0,
 		Anomalies:     agyCLIUnknownSchemaAnomaly(2),
 	})
-	assertSessionProject(t, env.db, removedSessionID, "/home/user/removed")
-	assertSessionProject(t, env.db, retaggedSessionID, "/home/user/retagged")
+	assertSessionProject(t, env.db, removedSessionID, "removed")
+	assertSessionState(t, env.db, removedSessionID, func(sess *db.Session) {
+		assert.Equal(t, removedWorkspace, sess.Cwd)
+	})
+	assertSessionProject(t, env.db, retaggedSessionID, "retagged")
+	assertSessionState(t, env.db, retaggedSessionID, func(sess *db.Session) {
+		assert.Equal(t, retaggedWorkspace, sess.Cwd)
+	})
 
 	updated := base.Add(time.Minute)
-	retaggedHistory := fmt.Sprintf(
-		`{"conversationId": %q, "workspace": "/home/user/retagged-now", "timestamp": %d, "display": "Retagged history prompt"}`+"\n",
-		retaggedID, updated.UnixMilli(),
-	)
-	require.NoError(t, os.WriteFile(historyPath, []byte(retaggedHistory), 0o644))
+	retaggedHistory, err := json.Marshal(map[string]any{
+		"conversationId": retaggedID, "workspace": updatedWorkspace,
+		"timestamp": updated.UnixMilli(), "display": "Retagged history prompt",
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(historyPath, retaggedHistory, 0o644))
 	require.NoError(t, os.Chtimes(historyPath, updated, updated))
 
 	env.engine.SyncPaths([]string{historyPath})
 
 	assertSessionProject(t, env.db, removedSessionID, "")
-	assertSessionProject(t, env.db, retaggedSessionID, "/home/user/retagged-now")
+	assertSessionState(t, env.db, removedSessionID, func(sess *db.Session) {
+		assert.Equal(t, "", sess.Cwd)
+	})
+	assertSessionProject(t, env.db, retaggedSessionID, "retagged_now")
+	assertSessionState(t, env.db, retaggedSessionID, func(sess *db.Session) {
+		assert.Equal(t, updatedWorkspace, sess.Cwd)
+	})
 	assertSessionMessageCount(t, env.db, removedSessionID, 1)
 	assertSessionMessageCount(t, env.db, retaggedSessionID, 1)
 }
