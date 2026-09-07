@@ -1,7 +1,6 @@
 package parser
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json/jsontext"
@@ -11,8 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/tidwall/gjson"
 )
 
 // discoveryDiskMap is a short-lived, disk-backed lookup used when discovery
@@ -109,52 +106,6 @@ func newDiscoveryDiskMap() (*discoveryDiskMap, error) {
 		return nil, err
 	}
 	return &discoveryDiskMap{path: path, db: database, remove: os.Remove}, nil
-}
-
-func (m *discoveryDiskMap) loadJSONL(
-	ctx context.Context, path, keyField, valueField string,
-) error {
-	file, err := os.Open(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	tx, err := m.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT OR REPLACE INTO entries (key, ordinal, value)
-		VALUES (?, 0, ?)
-	`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		line := scanner.Bytes()
-		key := gjson.GetBytes(line, keyField).String()
-		value := gjson.GetBytes(line, valueField).String()
-		if key == "" || value == "" {
-			continue
-		}
-		if _, err := stmt.ExecContext(ctx, key, value); err != nil {
-			return err
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan discovery metadata: %w", err)
-	}
-	return tx.Commit()
 }
 
 func (m *discoveryDiskMap) get(

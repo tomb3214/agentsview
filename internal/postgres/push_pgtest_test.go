@@ -8,6 +8,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -3141,8 +3142,10 @@ func TestArchiveIdentityChangeRepublishesUnchangedSessions(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = syncer.Push(ctx, false, nil)
+	failed, err := syncer.Push(ctx, false, nil)
 	require.ErrorContains(t, err, "archive salt mismatch")
+	require.Equal(t, 1, failed.SessionsPushed,
+		"session batch commits before archive metadata publication fails")
 	persistedArchiveID, err := localDB.GetSyncState(lastPushSourceArchiveIDKey)
 	require.NoError(t, err)
 	assert.Equal(t, oldArchiveID, persistedArchiveID,
@@ -3155,7 +3158,8 @@ func TestArchiveIdentityChangeRepublishesUnchangedSessions(t *testing.T) {
 
 	second, err := syncer.Push(ctx, false, nil)
 	require.NoError(t, err)
-	assert.Equal(t, 1, second.SessionsPushed)
+	assert.Zero(t, second.SessionsPushed,
+		"retry resumes the committed session batch and completes metadata publication")
 	var gotArchiveID string
 	require.NoError(t, pg.QueryRowContext(ctx, `
 		SELECT source_archive_id FROM sessions WHERE id = 'sess-1'`,
@@ -3656,4 +3660,225 @@ func TestFullPushResumesCommittedBatchesAndRestartsAfterTargetReset(
 		WHERE session_id = 'session-000' AND ordinal = 1`,
 	).Scan(&finalContent))
 	assert.Equal(t, "changed session-000", finalContent)
+}
+
+// A message update must not churn large, unchanged event content. Events use
+// logical ordinal/call keys, so replacing messages need not replace them.
+func TestPushPreservesUnchangedToolResults(t *testing.T) {
+	pgURL := testPGURL(t)
+	const schema = "agentsview_preserve_tool_results_test"
+	cleanNamedPGSchema(t, pgURL, schema)
+	t.Cleanup(func() { cleanNamedPGSchema(t, pgURL, schema) })
+	ctx := context.Background()
+	local, err := db.Open(filepath.Join(t.TempDir(), "local.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, local.Close()) })
+	syncer, err := New(pgURL, schema, local, "machine", true, SyncOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, syncer.Close()) })
+	require.NoError(t, syncer.EnsureSchema(ctx))
+	store, err := NewStore(pgURL, schema, true)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	const id = "tool-result-preservation"
+	require.NoError(t, local.UpsertSession(db.Session{
+		ID: id, Machine: "machine", Project: "project", Agent: "codex",
+	}))
+	msgs := []db.Message{
+		{SessionID: id, Ordinal: 0, Role: "user", Content: "inspect", ContentLength: 7},
+		{SessionID: id, Ordinal: 1, Role: "assistant", Content: "result", ContentLength: 6,
+			HasToolUse: true, ToolCalls: []db.ToolCall{{ToolName: "Read", Category: "file",
+				ToolUseID: "call-1", ResultEvents: []db.ToolResultEvent{{
+					ToolUseID: "call-1", AgentID: "worker", SubagentSessionID: "child",
+					Source: "cli", Status: "ok", Content: strings.Repeat("result payload ", 4096),
+					ContentLength: 15 * 4096, Timestamp: "2026-07-01T10:00:01.123456Z",
+				}}}}},
+	}
+	require.NoError(t, local.InsertMessages(msgs))
+	push := func(full bool) {
+		t.Helper()
+		// Select the fixture again without changing full-mode or ownership semantics.
+		require.NoError(t, local.SetSyncState("last_push_at", ""))
+		require.NoError(t, local.SetSyncState(lastPushBoundaryStateKey, ""))
+		result, err := syncer.Push(ctx, full, nil)
+		require.NoError(t, err)
+		require.Zero(t, result.Errors)
+	}
+	type eventIdentity struct {
+		ID   int64
+		CTID string
+	}
+	event := func() eventIdentity {
+		t.Helper()
+		var got eventIdentity
+		require.NoError(t, syncer.pg.QueryRowContext(ctx,
+			`SELECT id, ctid::text FROM tool_result_events WHERE session_id=$1`, id).Scan(&got.ID, &got.CTID))
+		return got
+	}
+	parity := func() {
+		t.Helper()
+		want, err := localToolResultEventPGFingerprint(local, id)
+		require.NoError(t, err)
+		tx, err := syncer.pg.BeginTx(ctx, nil)
+		require.NoError(t, err)
+		got, err := pgToolResultEventFingerprint(ctx, tx, id)
+		require.NoError(t, err)
+		require.NoError(t, tx.Rollback())
+		assert.Equal(t, want, got, "every event field and logical relationship must match")
+		read, err := store.GetMessages(ctx, id, 0, 100, true)
+		require.NoError(t, err)
+		require.Len(t, read, len(msgs))
+		assert.Equal(t, msgs[1].Content, read[1].Content)
+		require.Len(t, read[1].ToolCalls, 1)
+		assert.Equal(t, msgs[1].ToolCalls[0].ResultEvents, read[1].ToolCalls[0].ResultEvents)
+	}
+	push(false)
+	original := event()
+	_, err = syncer.pg.ExecContext(ctx, `INSERT INTO pinned_messages(session_id,message_id,ordinal,note)
+  SELECT session_id,ordinal,ordinal,'retained pin' FROM messages WHERE session_id=$1 AND ordinal=0`, id)
+	require.NoError(t, err)
+	msgs = append(msgs, db.Message{SessionID: id, Ordinal: 2, Role: "user", Content: "continue", ContentLength: 8})
+	require.NoError(t, local.InsertMessages(msgs[2:]))
+	push(false)
+	assert.Equal(t, original, event(), "append must not delete/reinsert unchanged events")
+	parity()
+	msgs[1].Content = "edited"
+	require.NoError(t, local.ReplaceSessionMessages(id, msgs))
+	require.NoError(t, local.ReplaceSessionUsageEvents(id, []db.UsageEvent{{
+		SessionID: id, Source: "provider", Model: "model", InputTokens: 7,
+	}}))
+	push(false)
+	assert.Equal(t, original, event(), "message/usage changes must preserve event rows")
+	parity()
+	var pinCount int
+	require.NoError(t, syncer.pg.QueryRowContext(ctx, `SELECT count(*) FROM pinned_messages p
+  JOIN messages m ON m.ordinal=p.message_id AND m.session_id=p.session_id
+  WHERE p.session_id=$1 AND m.ordinal=0 AND p.note='retained pin'`, id).Scan(&pinCount))
+	assert.Equal(t, 1, pinCount)
+	// The non-preloaded retry path uses the same event fingerprint, too.
+	tx, err := syncer.pg.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	msgs[1].Content = "retry!"
+	require.NoError(t, local.ReplaceSessionMessages(id, msgs))
+	_, err = syncer.pushMessages(ctx, tx, id, false, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+	assert.Equal(t, original, event(), "fallback comparison must preserve unchanged events")
+	parity()
+	msgs[1].ToolCalls[0].ResultEvents[0].Content = "changed event"
+	msgs[1].ToolCalls[0].ResultEvents[0].ContentLength = 13
+	msgs[1].ToolCalls[0].ResultEvents[0].SubagentSessionID = "other-child"
+	require.NoError(t, local.ReplaceSessionMessages(id, msgs))
+	push(false)
+	changed := event()
+	assert.NotEqual(t, original.ID, changed.ID, "changed event/context must replace stale data")
+	parity()
+	push(true)
+	assert.NotEqual(t, changed.ID, event().ID, "explicit full push keeps replacement behavior")
+	parity()
+	msgs[1].ToolCalls[0].ResultEvents = nil
+	require.NoError(t, local.ReplaceSessionMessages(id, msgs))
+	push(false)
+	parity()
+	var count int
+	require.NoError(t, syncer.pg.QueryRowContext(ctx,
+		`SELECT count(*) FROM tool_result_events WHERE session_id=$1`, id).Scan(&count))
+	assert.Zero(t, count, "removed event must not survive")
+	// Restore one result, then prove normal exclusion still removes the session and children.
+	msgs[1].ToolCalls[0].ResultEvents = []db.ToolResultEvent{{Source: "cli", Status: "ok", Content: "again", ContentLength: 5}}
+	require.NoError(t, local.ReplaceSessionMessages(id, msgs))
+	push(false)
+	_, err = syncer.pg.ExecContext(ctx, `INSERT INTO excluded_sessions(id) VALUES($1)`, id)
+	require.NoError(t, err)
+	push(false)
+	require.NoError(t, syncer.pg.QueryRowContext(ctx,
+		`SELECT count(*) FROM tool_result_events WHERE session_id=$1`, id).Scan(&count))
+	assert.Zero(t, count)
+	require.NoError(t, syncer.pg.QueryRowContext(ctx,
+		`SELECT count(*) FROM sessions WHERE id=$1`, id).Scan(&count))
+	assert.Zero(t, count)
+}
+
+// Preloaded event equality must not survive another permitted same-owner
+// publication before this transaction acquires the session row lock.
+func TestPushToolResultsRechecksAfterOverlappingWriter(t *testing.T) {
+	pgURL := testPGURL(t)
+	const schema = "agentsview_tool_results_overlap_test"
+	const id = "overlapping-result"
+	cleanNamedPGSchema(t, pgURL, schema)
+	t.Cleanup(func() { cleanNamedPGSchema(t, pgURL, schema) })
+	ctx := context.Background()
+	source := func(name, content string) *db.DB {
+		t.Helper()
+		local, err := db.Open(filepath.Join(t.TempDir(), name+".db"))
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, local.Close()) })
+		require.NoError(t, local.UpsertSession(db.Session{
+			ID: id, Machine: "machine", Project: "project", Agent: "codex",
+		}))
+		require.NoError(t, local.InsertMessages([]db.Message{
+			{SessionID: id, Ordinal: 0, Role: "user", Content: "inspect", ContentLength: 7},
+			{SessionID: id, Ordinal: 1, Role: "assistant", Content: content, ContentLength: len(content), HasToolUse: true,
+				ToolCalls: []db.ToolCall{{ToolName: "Read", Category: "file", ToolUseID: "call-1",
+					ResultEvents: []db.ToolResultEvent{{ToolUseID: "call-1", Source: "cli", Status: "ok",
+						Content: content, ContentLength: len(content), SubagentSessionID: content}}}}},
+		}))
+		return local
+	}
+	localA, localB := source("a", "result A"), source("b", "result B")
+	syncA, err := New(pgURL, schema, localA, "machine", true, SyncOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, syncA.Close()) })
+	require.NoError(t, syncA.EnsureSchema(ctx))
+	_, err = syncA.Push(ctx, false, nil)
+	require.NoError(t, err)
+	var owner string
+	require.NoError(t, syncA.pg.QueryRowContext(ctx, `SELECT owner_marker FROM sessions WHERE id=$1`, id).Scan(&owner))
+	require.NotEmpty(t, owner)
+	require.NoError(t, localA.InsertMessages([]db.Message{{SessionID: id, Ordinal: 2, Role: "user", Content: "continue A", ContentLength: 10}}))
+	txA, err := syncA.pg.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer txA.Rollback()
+	preloadA, err := readPushSessionMessageComparisons(ctx, txA, []string{id})
+	require.NoError(t, err)
+	localFP, err := localToolResultEventPGFingerprint(localA, id)
+	require.NoError(t, err)
+	require.Equal(t, localFP, preloadA.ToolResultFingerprint[id], "A observed exact equality before B")
+	// B uses the same permitted owner and source provenance, as a concurrent
+	// copy of the same archive can, and commits through the normal row paths.
+	syncB := &Sync{pg: syncA.pg, local: localB, machine: "machine", schema: schema,
+		archiveID: syncA.archiveID, databaseGeneration: syncA.databaseGeneration}
+	txB, err := syncA.pg.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer txB.Rollback()
+	sessB, err := localB.GetSession(ctx, id)
+	require.NoError(t, err)
+	require.NoError(t, syncB.pushSession(ctx, txB, *sessB, owner, nil))
+	_, err = syncB.pushMessages(ctx, txB, id, false, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, txB.Commit())
+	sessA, err := localA.GetSession(ctx, id)
+	require.NoError(t, err)
+	require.NoError(t, syncA.pushSession(ctx, txA, *sessA, owner, nil))
+	_, err = syncA.pushMessages(ctx, txA, id, false, nil, preloadA)
+	require.NoError(t, err)
+	require.NoError(t, txA.Commit())
+	store, err := NewStore(pgURL, schema, true)
+	require.NoError(t, err)
+	defer store.Close()
+	got, err := store.GetMessages(ctx, id, 0, 100, true)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	assert.Equal(t, "result A", got[1].Content)
+	assert.Equal(t, "continue A", got[2].Content)
+	require.Len(t, got[1].ToolCalls, 1)
+	require.Len(t, got[1].ToolCalls[0].ResultEvents, 1)
+	assert.Equal(t, "result A", got[1].ToolCalls[0].ResultEvents[0].Content)
+	assert.Equal(t, "result A", got[1].ToolCalls[0].ResultEvents[0].SubagentSessionID)
+	tx, err := syncA.pg.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer tx.Rollback()
+	finalFP, err := pgToolResultEventFingerprint(ctx, tx, id)
+	require.NoError(t, err)
+	assert.Equal(t, localFP, finalFP, "message A must never retain event B from a stale preload")
 }

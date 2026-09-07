@@ -1,4 +1,7 @@
-# Prepare an admitted ChatGPT export
+---
+title: Prepare an admitted ChatGPT export
+description: Select hash-bound ChatGPT conversations before database import while retaining raw mappings and referenced assets
+---
 
 `agentsview import prepare-chatgpt EXPORT_DIR --manifest MANIFEST.json --output NEW_DIR`
 

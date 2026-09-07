@@ -137,7 +137,7 @@ function appSourceSlice(startMarker: string, endMarker: string): string {
 }
 
 describe("App Recall availability", () => {
-  it("opens Generated insights without querying the corpus on a read-only backend", async () => {
+  it("opens the Recall corpus on a read-only backend", async () => {
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -181,12 +181,12 @@ describe("App Recall availability", () => {
     component = mount(App, { target: document.body });
     await flushEffects();
 
-    expect(document.body.textContent).toContain("Generated insights");
+    expect(document.querySelector(".recall-corpus-panel")).not.toBeNull();
     expect(
       fetchSpy.mock.calls.some(([input]) =>
-        String(input).includes("/recall/"),
+        String(input).includes("/recall/entries?"),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 });
 

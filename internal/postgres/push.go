@@ -577,7 +577,7 @@ func (s *Sync) PushWithOptions(
 		delete(priorFingerprints, id)
 	}
 
-	var pushed []db.Session
+	pushed := make([]db.Session, 0)
 	if len(priorFingerprints) > 0 {
 		for id, sess := range sessionByID {
 			if priorFingerprint, ok := priorFingerprints[id]; ok &&
@@ -3150,13 +3150,31 @@ func (s *Sync) pushMessages(
 	if err != nil {
 		return 0, err
 	}
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM tool_result_events
-		WHERE session_id = $1
-	`, sessionID); err != nil {
-		return 0, fmt.Errorf(
-			"deleting pg tool_result_events: %w", err,
-		)
+	// The session row is locked before this replacement path. The batch
+	// preload predates that lock, so it cannot authorize retaining events:
+	// another same-owner push may have committed different results meanwhile.
+	// Compare the current PG rows using the existing exact fingerprint.
+	preserveResults := false
+	if !full {
+		localResultFP, err := localToolResultEventPGFingerprint(s.local, sessionID)
+		if err != nil {
+			return 0, fmt.Errorf("computing local tool_result_event fingerprint: %w", err)
+		}
+		pgResultFP, err := pgToolResultEventFingerprint(ctx, tx, sessionID)
+		if err != nil {
+			return 0, fmt.Errorf("computing pg tool_result_event fingerprint: %w", err)
+		}
+		preserveResults = localResultFP == pgResultFP
+	}
+	if !preserveResults {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM tool_result_events
+			WHERE session_id = $1
+		`, sessionID); err != nil {
+			return 0, fmt.Errorf(
+				"deleting pg tool_result_events: %w", err,
+			)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM tool_calls
@@ -3214,10 +3232,12 @@ func (s *Sync) pushMessages(
 		); err != nil {
 			return count, err
 		}
-		if err := bulkInsertToolResultEvents(
-			ctx, tx, sessionID, msgs,
-		); err != nil {
-			return count, err
+		if !preserveResults {
+			if err := bulkInsertToolResultEvents(
+				ctx, tx, sessionID, msgs,
+			); err != nil {
+				return count, err
+			}
 		}
 		count += len(msgs)
 		startOrdinal = nextOrdinal

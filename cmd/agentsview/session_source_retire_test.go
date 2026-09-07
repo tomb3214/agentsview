@@ -6,6 +6,7 @@ import (
 	"encoding/json/v2"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,13 +17,18 @@ import (
 func TestSessionSourceRetireCommandSendsExactProof(t *testing.T) {
 	t.Parallel()
 	const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	fixturePath := filepath.Join(t.TempDir(), "task.jsonl")
 	var got service.SessionSourceRetirementInput
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)
 		assert.Equal(t, "/api/v1/sessions/source-retire", r.URL.Path)
 		require.NoError(t, json.UnmarshalRead(r.Body, &got))
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"session_id":"codex:task","machine":"machine","agent":"codex","file_path":"/archive/task.jsonl","file_hash":"` + hash + `","message_count":2,"retired_at":"2026-09-03T00:00:00Z"}`))
+		require.NoError(t, json.MarshalWrite(w, map[string]any{
+			"session_id": "codex:task", "machine": "machine", "agent": "codex",
+			"file_path": fixturePath, "file_hash": hash, "message_count": 2,
+			"retired_at": "2026-09-03T00:00:00Z",
+		}))
 	}))
 	defer server.Close()
 
@@ -32,15 +38,16 @@ func TestSessionSourceRetireCommandSendsExactProof(t *testing.T) {
 		"--server", server.URL,
 		"--machine", "machine",
 		"--agent", "codex",
-		"--path", "/archive/task.jsonl",
+		"--path", fixturePath,
 		"--sha256", hash,
 		"--format", "json",
 	)
 
 	require.NoError(t, err)
 	assert.Equal(t, "codex:task", got.SessionID)
-	assert.Equal(t, "/archive/task.jsonl", got.FilePath)
+	assert.Equal(t, fixturePath, got.FilePath)
 	var receipt map[string]any
 	require.NoError(t, json.Unmarshal([]byte(output), &receipt))
 	assert.Equal(t, "codex:task", receipt["session_id"])
+	assert.Equal(t, fixturePath, receipt["file_path"])
 }
