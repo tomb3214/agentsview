@@ -3795,3 +3795,87 @@ func TestPushPreservesUnchangedToolResults(t *testing.T) {
 		`SELECT count(*) FROM sessions WHERE id=$1`, id).Scan(&count))
 	assert.Zero(t, count)
 }
+
+// Preloaded event equality must not survive another permitted same-owner
+// publication before this transaction acquires the session row lock.
+func TestPushToolResultsRechecksAfterOverlappingWriter(t *testing.T) {
+	pgURL := testPGURL(t)
+	const schema = "agentsview_tool_results_overlap_test"
+	const id = "overlapping-result"
+	cleanNamedPGSchema(t, pgURL, schema)
+	t.Cleanup(func() { cleanNamedPGSchema(t, pgURL, schema) })
+	ctx := context.Background()
+	source := func(name, content string) *db.DB {
+		t.Helper()
+		local, err := db.Open(filepath.Join(t.TempDir(), name+".db"))
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, local.Close()) })
+		require.NoError(t, local.UpsertSession(db.Session{
+			ID: id, Machine: "machine", Project: "project", Agent: "codex",
+		}))
+		require.NoError(t, local.InsertMessages([]db.Message{
+			{SessionID: id, Ordinal: 0, Role: "user", Content: "inspect", ContentLength: 7},
+			{SessionID: id, Ordinal: 1, Role: "assistant", Content: content, ContentLength: len(content), HasToolUse: true,
+				ToolCalls: []db.ToolCall{{ToolName: "Read", Category: "file", ToolUseID: "call-1",
+					ResultEvents: []db.ToolResultEvent{{ToolUseID: "call-1", Source: "cli", Status: "ok",
+						Content: content, ContentLength: len(content), SubagentSessionID: content}}}}},
+		}))
+		return local
+	}
+	localA, localB := source("a", "result A"), source("b", "result B")
+	syncA, err := New(pgURL, schema, localA, "machine", true, SyncOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, syncA.Close()) })
+	require.NoError(t, syncA.EnsureSchema(ctx))
+	_, err = syncA.Push(ctx, false, nil)
+	require.NoError(t, err)
+	var owner string
+	require.NoError(t, syncA.pg.QueryRowContext(ctx, `SELECT owner_marker FROM sessions WHERE id=$1`, id).Scan(&owner))
+	require.NotEmpty(t, owner)
+	require.NoError(t, localA.InsertMessages([]db.Message{{SessionID: id, Ordinal: 2, Role: "user", Content: "continue A", ContentLength: 10}}))
+	txA, err := syncA.pg.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer txA.Rollback()
+	preloadA, err := readPushSessionMessageComparisons(ctx, txA, []string{id})
+	require.NoError(t, err)
+	localFP, err := localToolResultEventPGFingerprint(localA, id)
+	require.NoError(t, err)
+	require.Equal(t, localFP, preloadA.ToolResultFingerprint[id], "A observed exact equality before B")
+	// B uses the same permitted owner and source provenance, as a concurrent
+	// copy of the same archive can, and commits through the normal row paths.
+	syncB := &Sync{pg: syncA.pg, local: localB, machine: "machine", schema: schema,
+		archiveID: syncA.archiveID, databaseGeneration: syncA.databaseGeneration}
+	txB, err := syncA.pg.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer txB.Rollback()
+	sessB, err := localB.GetSession(ctx, id)
+	require.NoError(t, err)
+	require.NoError(t, syncB.pushSession(ctx, txB, *sessB, owner, nil))
+	_, err = syncB.pushMessages(ctx, txB, id, false, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, txB.Commit())
+	sessA, err := localA.GetSession(ctx, id)
+	require.NoError(t, err)
+	require.NoError(t, syncA.pushSession(ctx, txA, *sessA, owner, nil))
+	_, err = syncA.pushMessages(ctx, txA, id, false, nil, preloadA)
+	require.NoError(t, err)
+	require.NoError(t, txA.Commit())
+	store, err := NewStore(pgURL, schema, true)
+	require.NoError(t, err)
+	defer store.Close()
+	got, err := store.GetMessages(ctx, id, 0, 100, true)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	assert.Equal(t, "result A", got[1].Content)
+	assert.Equal(t, "continue A", got[2].Content)
+	require.Len(t, got[1].ToolCalls, 1)
+	require.Len(t, got[1].ToolCalls[0].ResultEvents, 1)
+	assert.Equal(t, "result A", got[1].ToolCalls[0].ResultEvents[0].Content)
+	assert.Equal(t, "result A", got[1].ToolCalls[0].ResultEvents[0].SubagentSessionID)
+	tx, err := syncA.pg.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer tx.Rollback()
+	finalFP, err := pgToolResultEventFingerprint(ctx, tx, id)
+	require.NoError(t, err)
+	assert.Equal(t, localFP, finalFP, "message A must never retain event B from a stale preload")
+}

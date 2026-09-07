@@ -2970,27 +2970,6 @@ func (s *Sync) pushMessages(
 		}
 	}
 
-	// Tool results reference the session and logical ordinal/call keys;
-	// they do not cascade from message rows. Preserve them when a message
-	// append or another dependency changes but the exact event set does not.
-	var localResultFP, pgResultFP string
-	preserveResults := false
-	if !full {
-		localResultFP, err = localToolResultEventPGFingerprint(s.local, sessionID)
-		if err != nil {
-			return 0, fmt.Errorf("computing local tool_result_event fingerprint: %w", err)
-		}
-		if comparisons != nil {
-			pgResultFP = comparisons.ToolResultFingerprint[sessionID]
-		} else {
-			pgResultFP, err = pgToolResultEventFingerprint(ctx, tx, sessionID)
-			if err != nil {
-				return 0, fmt.Errorf("computing pg tool_result_event fingerprint: %w", err)
-			}
-		}
-		preserveResults = localResultFP == pgResultFP
-	}
-
 	if !full && pgAgg.Count == localCount && pgAgg.Count > 0 {
 		localFP := pushLocalMessageFingerprint{}
 
@@ -3055,7 +3034,14 @@ func (s *Sync) pushMessages(
 				"computing local tool_call fingerprint: %w", err,
 			)
 		}
-		localFP.ToolResultFP = localResultFP
+		localFP.ToolResultFP, err = localToolResultEventPGFingerprint(
+			s.local, sessionID,
+		)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"computing local tool_result_event fingerprint: %w", err,
+			)
+		}
 		localFP.TokenFP, err = s.local.MessageTokenFingerprint(sessionID)
 		if err != nil {
 			return 0, fmt.Errorf(
@@ -3120,6 +3106,13 @@ func (s *Sync) pushMessages(
 					err,
 				)
 			}
+			pgResultFP, err := pgToolResultEventFingerprint(ctx, tx, sessionID)
+			if err != nil {
+				return 0, fmt.Errorf(
+					"computing pg tool_result_event fingerprint: %w",
+					err,
+				)
+			}
 			pgUsageFP, err := pgUsageEventFingerprint(ctx, tx, sessionID)
 			if err != nil {
 				return 0, fmt.Errorf(
@@ -3156,6 +3149,22 @@ func (s *Sync) pushMessages(
 	savedPins, err := snapshotPinnedMessages(ctx, tx, sessionID)
 	if err != nil {
 		return 0, err
+	}
+	// The session row is locked before this replacement path. The batch
+	// preload predates that lock, so it cannot authorize retaining events:
+	// another same-owner push may have committed different results meanwhile.
+	// Compare the current PG rows using the existing exact fingerprint.
+	preserveResults := false
+	if !full {
+		localResultFP, err := localToolResultEventPGFingerprint(s.local, sessionID)
+		if err != nil {
+			return 0, fmt.Errorf("computing local tool_result_event fingerprint: %w", err)
+		}
+		pgResultFP, err := pgToolResultEventFingerprint(ctx, tx, sessionID)
+		if err != nil {
+			return 0, fmt.Errorf("computing pg tool_result_event fingerprint: %w", err)
+		}
+		preserveResults = localResultFP == pgResultFP
 	}
 	if !preserveResults {
 		if _, err := tx.ExecContext(ctx, `
