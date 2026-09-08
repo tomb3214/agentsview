@@ -372,7 +372,7 @@ func TestManagerStatusPublishesAndClearsBuildETA(t *testing.T) {
 	assert.Equal(t, "fake-model", status.Model)
 	assert.Equal(t, 3, status.Dimension)
 
-	m.finish(BuildResult{}, nil)
+	m.finish(BuildRequest{}, BuildResult{}, nil)
 	status = m.Status()
 	assert.False(t, status.EstimateReady)
 	assert.Zero(t, status.RatePerSecond)
@@ -578,4 +578,36 @@ func TestManagerActivateAndRetireRefuseWhileBuildRunning(t *testing.T) {
 
 	close(release)
 	waitFor(t, func() bool { return !m.Status().Running }, "build never finished")
+}
+
+// Completion survives later accepted/running/failed attempts, so a scheduler
+// can acknowledge a real backstop without treating submission as success.
+func TestManagerBackstopCompletionRequiresSuccess(t *testing.T) {
+	ix := openTestIndex(t)
+	m := NewManager(ix, twoDocSource(), soloEncoders(fakeBuildEncoder()), fakeGeneration("fake-model"))
+	stamp := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	m.now = func() time.Time { return stamp }
+	require.NoError(t, m.StartBuild(BuildRequest{Backstop: true, IncludeAutomated: true}))
+	m.Wait()
+	complete := m.Status().LastSuccessfulBackstop
+	require.NotNil(t, complete)
+	assert.Equal(t, stamp.Format(time.RFC3339Nano), complete.CompletedAt)
+	assert.Equal(t, m.Status().LastResult.Fingerprint, complete.Fingerprint)
+	assert.True(t, complete.IncludeAutomated)
+	// The status snapshot must not grant callers mutation of manager state.
+	complete.CompletedAt = "mutated"
+	assert.Equal(t, stamp.Format(time.RFC3339Nano), m.Status().LastSuccessfulBackstop.CompletedAt)
+
+	require.NoError(t, m.begin())
+	assert.ErrorIs(t, m.StartBuild(BuildRequest{Backstop: true}), ErrBuildRunning)
+	assert.Equal(t, stamp.Format(time.RFC3339Nano), m.Status().LastSuccessfulBackstop.CompletedAt)
+	m.finish(BuildRequest{Backstop: true}, BuildResult{}, errors.New("encoder interrupted"))
+	assert.Equal(t, stamp.Format(time.RFC3339Nano), m.Status().LastSuccessfulBackstop.CompletedAt)
+	assert.Equal(t, "encoder interrupted", m.Status().LastError)
+
+	stamp = stamp.Add(time.Hour)
+	require.NoError(t, m.begin())
+	m.finish(BuildRequest{}, BuildResult{}, nil)
+	assert.NotEqual(t, stamp.Format(time.RFC3339Nano), m.Status().LastSuccessfulBackstop.CompletedAt,
+		"successful ordinary build must not acknowledge a backstop")
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -123,8 +124,15 @@ type BuildRequest struct {
 	Using string `json:"using,omitempty"`
 }
 
-// BuildStatus reports the manager's current build state, for polling
-// clients (CLI and HTTP API).
+// BackstopCompletion records a completed full mirror reconciliation. Callers
+// may acknowledge it durably; accepting or joining a build is not completion.
+type BackstopCompletion struct {
+	CompletedAt      string `json:"completed_at"`
+	Fingerprint      string `json:"fingerprint"`
+	IncludeAutomated bool   `json:"include_automated"`
+}
+
+// BuildStatus reports current build state and actual completion for CLI/API clients.
 type BuildStatus struct {
 	Running bool `json:"running"`
 	// BuildID identifies one build within this daemon process: it increments
@@ -141,11 +149,12 @@ type BuildStatus struct {
 	Total     int64  `json:"total"`
 	// EstimateReady is true once the daemon has enough positive progress
 	// samples to publish a stable rate and ETA for the current build phase.
-	EstimateReady   bool         `json:"estimate_ready,omitempty"`
-	RatePerSecond   float64      `json:"rate_per_second,omitempty"`
-	ETAMilliseconds int64        `json:"eta_milliseconds"`
-	LastError       string       `json:"last_error,omitempty"`
-	LastResult      *BuildResult `json:"last_result,omitempty"`
+	EstimateReady          bool                `json:"estimate_ready,omitempty"`
+	RatePerSecond          float64             `json:"rate_per_second,omitempty"`
+	ETAMilliseconds        int64               `json:"eta_milliseconds"`
+	LastError              string              `json:"last_error,omitempty"`
+	LastResult             *BuildResult        `json:"last_result,omitempty"`
+	LastSuccessfulBackstop *BackstopCompletion `json:"last_successful_backstop,omitempty"`
 	// Model and Dimension identify the configured embedding space the
 	// manager builds ([vector.embeddings] model/dimension), so status
 	// consumers can display the target space even before any generation
@@ -274,7 +283,7 @@ func (m *Manager) StartBuild(req BuildRequest) error {
 	}
 	go func() {
 		result, err := m.runBuild(context.Background(), req, me)
-		m.finish(result, err)
+		m.finish(req, result, err)
 	}()
 	return nil
 }
@@ -294,7 +303,7 @@ func (m *Manager) TryBuild(ctx context.Context, req BuildRequest) (bool, error) 
 		return false, nil
 	}
 	result, err := m.runBuild(ctx, req, me)
-	m.finish(result, err)
+	m.finish(req, result, err)
 	return true, err
 }
 
@@ -307,6 +316,10 @@ func (m *Manager) Status() BuildStatus {
 	if status.LastResult != nil {
 		result := *status.LastResult
 		status.LastResult = &result
+	}
+	if status.LastSuccessfulBackstop != nil {
+		completion := *status.LastSuccessfulBackstop
+		status.LastSuccessfulBackstop = &completion
 	}
 	status.Model = m.gen.Model
 	status.Dimension = m.gen.Dimensions
@@ -456,7 +469,7 @@ func (m *Manager) reportProgress(p BuildProgress) {
 // LastResult always describes the most recent attempt, including its partial
 // progress when the attempt failed, so status consumers never pair a new
 // LastError with a stale successful result.
-func (m *Manager) finish(result BuildResult, err error) {
+func (m *Manager) finish(req BuildRequest, result BuildResult, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.running = false
@@ -470,9 +483,17 @@ func (m *Manager) finish(result BuildResult, err error) {
 	m.status.LastResult = &r
 	if err != nil {
 		m.status.LastError = err.Error()
+		log.Printf("embedding build failed: %v", err)
 		return
 	}
 	m.status.LastError = ""
+	if req.Backstop {
+		m.status.LastSuccessfulBackstop = &BackstopCompletion{
+			CompletedAt:      m.now().UTC().Format(time.RFC3339Nano),
+			Fingerprint:      result.Fingerprint,
+			IncludeAutomated: req.IncludeAutomated,
+		}
+	}
 }
 
 // clearETA resets both the private accumulator and its public status snapshot.
