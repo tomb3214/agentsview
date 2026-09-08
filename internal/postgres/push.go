@@ -3181,7 +3181,20 @@ func (s *Sync) pushMessages(
 		}
 		preserveResults = localResultFP == pgResultFP
 	}
-	if !preserveResults {
+	var remainingCalls, remainingResults pgToolRows
+	if !full {
+		remainingCalls, err = readPGToolRows(ctx, tx, sessionID, false)
+		if err != nil {
+			return 0, err
+		}
+		if !preserveResults {
+			remainingResults, err = readPGToolRows(ctx, tx, sessionID, true)
+			if err != nil {
+				return 0, err
+			}
+		}
+	}
+	if full {
 		if _, err := tx.ExecContext(ctx, `
 			DELETE FROM tool_result_events
 			WHERE session_id = $1
@@ -3191,13 +3204,15 @@ func (s *Sync) pushMessages(
 			)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM tool_calls
-		WHERE session_id = $1
-	`, sessionID); err != nil {
-		return 0, fmt.Errorf(
-			"deleting pg tool_calls: %w", err,
-		)
+	if full {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM tool_calls
+			WHERE session_id = $1
+		`, sessionID); err != nil {
+			return 0, fmt.Errorf(
+				"deleting pg tool_calls: %w", err,
+			)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM messages
@@ -3243,19 +3258,26 @@ func (s *Sync) pushMessages(
 			return count, err
 		}
 		if err := bulkInsertToolCalls(
-			ctx, tx, sessionID, msgs,
+			ctx, tx, sessionID, msgs, remainingCalls,
 		); err != nil {
 			return count, err
 		}
 		if !preserveResults {
 			if err := bulkInsertToolResultEvents(
-				ctx, tx, sessionID, msgs,
+				ctx, tx, sessionID, msgs, remainingResults,
 			); err != nil {
 				return count, err
 			}
 		}
 		count += len(msgs)
 		startOrdinal = nextOrdinal
+	}
+
+	if err := deleteStalePGToolRows(ctx, tx, sessionID, remainingCalls, false); err != nil {
+		return count, err
+	}
+	if err := deleteStalePGToolRows(ctx, tx, sessionID, remainingResults, true); err != nil {
+		return count, err
 	}
 
 	if err := restorePinnedMessages(
@@ -4191,10 +4213,72 @@ func bulkInsertCursorUsageEvents(
 	return nil
 }
 
-// bulkInsertToolCalls inserts tool calls using multi-row VALUES.
+type pgToolRowKey struct {
+	ordinal, callIndex, eventIndex int
+}
+
+// A non-nil map enables incremental reconciliation. Rows disappear from this
+// inventory as the authoritative local stream visits their logical keys.
+type pgToolRows map[pgToolRowKey]int64
+
+func readPGToolRows(ctx context.Context, tx *sql.Tx, sessionID string, events bool) (pgToolRows, error) {
+	query := `SELECT id, message_ordinal, call_index, -1 FROM tool_calls WHERE session_id=$1`
+	if events {
+		query = `SELECT id, tool_call_message_ordinal, call_index, event_index FROM tool_result_events WHERE session_id=$1`
+	}
+	rows, err := tx.QueryContext(ctx, query, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("reading pg tool row keys: %w", err)
+	}
+	defer rows.Close()
+	remaining := make(pgToolRows)
+	for rows.Next() {
+		var key pgToolRowKey
+		var id int64
+		if err := rows.Scan(&id, &key.ordinal, &key.callIndex, &key.eventIndex); err != nil {
+			return nil, fmt.Errorf("scanning pg tool row key: %w", err)
+		}
+		remaining[key] = id
+	}
+	return remaining, rows.Err()
+}
+
+func deleteStalePGToolRows(ctx context.Context, tx *sql.Tx, sessionID string, remaining pgToolRows, events bool) error {
+	ids := make([]int64, 0, len(remaining))
+	for _, id := range remaining {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	table := "tool_calls"
+	if events {
+		table = "tool_result_events"
+	}
+	const batchSize = 100
+	for start := 0; start < len(ids); start += batchSize {
+		batch := ids[start:min(start+batchSize, len(ids))]
+		var b strings.Builder
+		fmt.Fprintf(&b, "DELETE FROM %s WHERE session_id=$1 AND id IN (", table)
+		args := []any{sessionID}
+		for i, id := range batch {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, "$%d", i+2)
+			args = append(args, id)
+		}
+		b.WriteByte(')')
+		if _, err := tx.ExecContext(ctx, b.String(), args...); err != nil {
+			return fmt.Errorf("deleting stale pg %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+// bulkInsertToolCalls inserts tool calls using multi-row VALUES. Incremental
+// publication retains equal payload rows, avoiding their large GIN rewrites.
 func bulkInsertToolCalls(
 	ctx context.Context, tx *sql.Tx,
-	sessionID string, msgs []db.Message,
+	sessionID string, msgs []db.Message, remaining pgToolRows,
 ) error {
 	// Collect all tool calls from messages.
 	type tcRow struct {
@@ -4251,6 +4335,20 @@ func bulkInsertToolCalls(
 				nilIfEmpty(r.tc.FilePath),
 			)
 		}
+		if remaining != nil {
+			b.WriteString(` ON CONFLICT (session_id, message_ordinal, call_index) DO UPDATE SET
+				tool_name=EXCLUDED.tool_name, category=EXCLUDED.category,
+				tool_use_id=EXCLUDED.tool_use_id, input_json=EXCLUDED.input_json,
+				skill_name=EXCLUDED.skill_name, result_content_length=EXCLUDED.result_content_length,
+				result_content=EXCLUDED.result_content, subagent_session_id=EXCLUDED.subagent_session_id,
+				file_path=EXCLUDED.file_path
+			WHERE (tool_calls.tool_name, tool_calls.category, tool_calls.tool_use_id,
+				tool_calls.input_json, tool_calls.skill_name, tool_calls.result_content_length,
+				tool_calls.result_content, tool_calls.subagent_session_id, tool_calls.file_path)
+			IS DISTINCT FROM (EXCLUDED.tool_name, EXCLUDED.category, EXCLUDED.tool_use_id,
+				EXCLUDED.input_json, EXCLUDED.skill_name, EXCLUDED.result_content_length,
+				EXCLUDED.result_content, EXCLUDED.subagent_session_id, EXCLUDED.file_path)`)
+		}
 		if _, err := tx.ExecContext(
 			ctx, b.String(), args...,
 		); err != nil {
@@ -4258,13 +4356,16 @@ func bulkInsertToolCalls(
 				"bulk inserting tool_calls: %w", err,
 			)
 		}
+		for _, r := range batch {
+			delete(remaining, pgToolRowKey{r.ordinal, r.index, -1})
+		}
 	}
 	return nil
 }
 
 func bulkInsertToolResultEvents(
 	ctx context.Context, tx *sql.Tx,
-	sessionID string, msgs []db.Message,
+	sessionID string, msgs []db.Message, remaining pgToolRows,
 ) error {
 	type evRow struct {
 		ordinal int
@@ -4327,8 +4428,25 @@ func bulkInsertToolResultEvents(
 				r.ev.EventIndex,
 			)
 		}
+		if remaining != nil {
+			b.WriteString(` ON CONFLICT (session_id, tool_call_message_ordinal, call_index, event_index) DO UPDATE SET
+				tool_use_id=EXCLUDED.tool_use_id, agent_id=EXCLUDED.agent_id,
+				subagent_session_id=EXCLUDED.subagent_session_id, source=EXCLUDED.source,
+				status=EXCLUDED.status, content=EXCLUDED.content,
+				content_length=EXCLUDED.content_length, timestamp=EXCLUDED.timestamp
+			WHERE (tool_result_events.tool_use_id, tool_result_events.agent_id,
+				tool_result_events.subagent_session_id, tool_result_events.source,
+				tool_result_events.status, tool_result_events.content,
+				tool_result_events.content_length, tool_result_events.timestamp)
+			IS DISTINCT FROM (EXCLUDED.tool_use_id, EXCLUDED.agent_id,
+				EXCLUDED.subagent_session_id, EXCLUDED.source, EXCLUDED.status,
+				EXCLUDED.content, EXCLUDED.content_length, EXCLUDED.timestamp)`)
+		}
 		if _, err := tx.ExecContext(ctx, b.String(), args...); err != nil {
 			return fmt.Errorf("bulk inserting tool_result_events: %w", err)
+		}
+		for _, r := range batch {
+			delete(remaining, pgToolRowKey{r.ordinal, r.index, r.ev.EventIndex})
 		}
 	}
 	return nil
