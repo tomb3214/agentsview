@@ -372,6 +372,11 @@ func pushWatchOwnerCases(t *testing.T) []pushWatchOwnerCase {
 	// measure watch coordination rather than fixture creation on slow runners.
 	localDuckDB := testLocalArchiveWriteBackend(t)
 	localPostgreSQL := testLocalArchiveWriteBackend(t)
+	for _, backend := range []*localArchiveWriteBackend{localDuckDB, localPostgreSQL} {
+		// Engine construction also persists first-use SQLite migration markers.
+		engine := syncpkg.NewEngine(backend.database, syncpkg.EngineConfig{})
+		engine.Close()
+	}
 	return []pushWatchOwnerCase{
 		{
 			name: "daemon DuckDB",
