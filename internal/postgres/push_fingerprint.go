@@ -188,11 +188,21 @@ func readLocalPushDependencyState(
 // only queried on the usageKnown=false fallback, which the push loop never
 // takes (it prefetches usage fingerprints for every candidate).
 func (st *localPushDependencyState) dependencyFingerprint(
+	local *db.DB, sessionID, usageEventFingerprint string, usageKnown bool,
+) (string, error) {
+	msgFP, err := st.messageFingerprint(local, sessionID, usageEventFingerprint, usageKnown)
+	if err != nil {
+		return "", err
+	}
+	return hashLocalDependencyPayload(msgFP, st.secretFindings[sessionID], st.pins[sessionID])
+}
+
+func (st *localPushDependencyState) messageFingerprint(
 	local *db.DB,
 	sessionID string,
 	usageEventFingerprint string,
 	usageKnown bool,
-) (string, error) {
+) (pushLocalMessageFingerprint, error) {
 	agg := st.contentAgg[sessionID]
 	msgFP := pushLocalMessageFingerprint{
 		Sum:           agg.Sum,
@@ -214,14 +224,12 @@ func (st *localPushDependencyState) dependencyFingerprint(
 		var err error
 		msgFP.UsageEventFP, err = local.UsageEventFingerprint(sessionID)
 		if err != nil {
-			return "", fmt.Errorf(
+			return msgFP, fmt.Errorf(
 				"computing local usage event fingerprint: %w", err,
 			)
 		}
 	}
-	return hashLocalDependencyPayload(
-		msgFP, st.secretFindings[sessionID], st.pins[sessionID],
-	)
+	return msgFP, nil
 }
 
 func localPushMessageFingerprint(

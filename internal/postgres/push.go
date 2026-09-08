@@ -499,6 +499,14 @@ func (s *Sync) PushWithOptions(
 
 	var priorFingerprints map[string]string
 	sessionFingerprints := make(map[string]string, len(sessionByID))
+	var localSummaries *localPushMessageSummaries
+	if !replaceMessages {
+		localSummaries = &localPushMessageSummaries{
+			archiveID: s.archiveID, databaseID: s.databaseGeneration,
+			sessions: make(map[string]localPushMessageSummary, len(sessionByID)),
+		}
+	}
+
 	if !full {
 		var bErr error
 		priorFingerprints, _, _, bErr = readBoundaryAndFingerprints(
@@ -550,9 +558,11 @@ func (s *Sync) PushWithOptions(
 		}
 		for _, id := range chunk {
 			usageFP, usageKnown := usageFingerprints[id]
-			dependencyFP, err := depState.dependencyFingerprint(
-				s.local, id, usageFP, usageKnown,
-			)
+			messageFP, err := depState.messageFingerprint(s.local, id, usageFP, usageKnown)
+			if err != nil {
+				return result, err
+			}
+			dependencyFP, err := hashLocalDependencyPayload(messageFP, depState.secretFindings[id], depState.pins[id])
 			if err != nil {
 				return result, fmt.Errorf(
 					"computing local dependency fingerprint %s: %w",
@@ -560,6 +570,20 @@ func (s *Sync) PushWithOptions(
 				)
 			}
 			sess := sessionByID[id]
+			if localSummaries != nil && stringValue(sess.TranscriptRevision) != "" {
+				messageDigest := dependencyFP
+				if depState.secretFindings[id] != nil || depState.pins[id] != nil {
+					messageDigest, err = hashLocalDependencyPayload(messageFP, nil, nil)
+					if err != nil {
+						return result, err
+					}
+				}
+				localSummaries.sessions[id] = localPushMessageSummary{
+					digest: messageDigest, revision: stringValue(sess.TranscriptRevision),
+					modified: stringValue(sess.LocalModifiedAt), count: sess.MessageCount,
+				}
+			}
+
 			sessionFingerprints[id] = sessionPushFingerprint(
 				sess, pushedSessionMachine(sess, s.machine),
 				s.archiveID, usageFP, markerID,
@@ -737,7 +761,7 @@ func (s *Sync) PushWithOptions(
 		batchPushedStart := len(pushed)
 		batchResult, err := s.pushBatch(
 			ctx, batch, replaceMessages, markerID, legacyMarkerMachines,
-			usageFingerprints, &pushed, fullPushRunIdentity,
+			usageFingerprints, &pushed, fullPushRunIdentity, localSummaries,
 		)
 		if err != nil {
 			return result, err
@@ -762,7 +786,7 @@ func (s *Sync) PushWithOptions(
 				sr, retryErr := s.pushBatch(
 					ctx, []db.Session{sess},
 					replaceMessages, markerID, legacyMarkerMachines,
-					usageFingerprints, &pushed, fullPushRunIdentity,
+					usageFingerprints, &pushed, fullPushRunIdentity, localSummaries,
 				)
 				if retryErr != nil {
 					return result, retryErr
@@ -1566,12 +1590,13 @@ func (s *Sync) pushBatch(
 	sessionUsageFingerprints map[string]string,
 	pushed *[]db.Session,
 	fullPushRunIdentity *fullPushIdentity,
+	localSummaries ...*localPushMessageSummaries,
 ) (batchResult, error) {
 	preloadComparisons := len(batch) > 0 && !full
 	result, err := s.pushBatchAttempt(
 		ctx, batch, full, markerID, legacyMarkerMachines,
 		sessionUsageFingerprints, pushed, preloadComparisons,
-		fullPushRunIdentity,
+		fullPushRunIdentity, localSummaries...,
 	)
 	if err == nil || !errors.Is(err, errPushComparisonPreload) {
 		return result, err
@@ -1584,7 +1609,7 @@ func (s *Sync) pushBatch(
 	return s.pushBatchAttempt(
 		ctx, batch, full, markerID, legacyMarkerMachines,
 		sessionUsageFingerprints, pushed, false,
-		fullPushRunIdentity,
+		fullPushRunIdentity, localSummaries...,
 	)
 }
 
@@ -1598,6 +1623,7 @@ func (s *Sync) pushBatchAttempt(
 	pushed *[]db.Session,
 	preloadComparisons bool,
 	fullPushRunIdentity *fullPushIdentity,
+	localSummaries ...*localPushMessageSummaries,
 ) (batchResult, error) {
 	tx, err := s.pg.BeginTx(ctx, nil)
 	if err != nil {
@@ -1649,7 +1675,7 @@ func (s *Sync) pushBatchAttempt(
 
 		msgCount, err := s.pushMessages(
 			ctx, tx, sess.ID, full,
-			sessionUsageFingerprints, comparisons,
+			sessionUsageFingerprints, comparisons, localSummaries...,
 		)
 		if err != nil {
 			log.Printf(
@@ -2891,6 +2917,7 @@ func (s *Sync) pushMessages(
 	full bool,
 	sessionUsageFingerprints map[string]string,
 	comparisons *pushMessageComparison,
+	localSummaries ...*localPushMessageSummaries,
 ) (int, error) {
 	localCount, err := s.local.MessageCount(sessionID)
 	if err != nil {
@@ -2985,7 +3012,18 @@ func (s *Sync) pushMessages(
 		}
 	}
 
-	if !full && pgAgg.Count == localCount && pgAgg.Count > 0 {
+	compareLocal := !full && pgAgg.Count == localCount && pgAgg.Count > 0
+	if compareLocal && len(localSummaries) > 0 {
+		equal, used, summaryErr := localSummaries[0].compare(ctx, s.local, sessionID, localCount, comparisons)
+		if summaryErr != nil {
+			return 0, summaryErr
+		}
+		if equal {
+			return 0, nil
+		}
+		compareLocal = !used
+	}
+	if compareLocal {
 		localFP := pushLocalMessageFingerprint{}
 
 		localFP.Sum, localFP.Max, localFP.Min, err = s.local.MessageContentFingerprint(
