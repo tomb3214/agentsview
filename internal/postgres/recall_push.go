@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"strings"
+
+	"go.kenn.io/agentsview/internal/db"
 )
 
 const recallPublicationRevisionStateKey = "recall_publication_revision_v1"
@@ -46,47 +48,8 @@ func (s *Sync) syncRecallPublication(
 	); err != nil {
 		return err
 	}
-	for _, entry := range snapshot.Entries {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO recall_entries (
-				id, machine, type, scope, status, review_state, title, body,
-				trigger, confidence, uncertainty, project, cwd, git_branch,
-				agent, source_session_id, source_episode_id, source_run_id,
-				extractor_method, model, transferable, provenance_ok,
-				supersedes_entry_id, superseded_by_entry_id, created_at, updated_at
-			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-				$14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-				$25::timestamptz, $26::timestamptz
-			)`,
-			entry.ID, s.machine, entry.Type, entry.Scope, entry.Status,
-			entry.ReviewState, entry.Title, entry.Body, entry.Trigger,
-			entry.Confidence, entry.Uncertainty, entry.Project, entry.CWD,
-			entry.GitBranch, entry.Agent, entry.SourceSessionID,
-			entry.SourceEpisodeID, entry.SourceRunID, entry.ExtractorMethod,
-			entry.Model, entry.Transferable, entry.ProvenanceOK,
-			entry.SupersedesEntryID, entry.SupersededByEntryID,
-			entry.CreatedAt, entry.UpdatedAt,
-		); err != nil {
-			return fmt.Errorf("publishing Recall entry %s: %w", entry.ID, err)
-		}
-		for _, evidence := range entry.Evidence {
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO recall_evidence (
-					entry_id, session_id, message_start_ordinal,
-					message_end_ordinal, message_start_source_uuid,
-					message_end_source_uuid, content_digest, tool_use_id, snippet
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-				entry.ID, evidence.SessionID, evidence.MessageStartOrdinal,
-				evidence.MessageEndOrdinal, evidence.MessageStartSourceUUID,
-				evidence.MessageEndSourceUUID, evidence.ContentDigest,
-				evidence.ToolUseID, evidence.Snippet,
-			); err != nil {
-				return fmt.Errorf(
-					"publishing Recall evidence for %s: %w", entry.ID, err,
-				)
-			}
-		}
+	if err := insertPGRecallPublication(ctx, tx, s.machine, snapshot.Entries); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing Recall publication: %w", err)
@@ -99,6 +62,90 @@ func (s *Sync) syncRecallPublication(
 		len(snapshot.Entries), pluralSuffix(len(snapshot.Entries), "y", "ies"), s.machine,
 	)
 	return nil
+}
+
+// Batch requests without changing the encompassing publication transaction.
+// Insert parents first, then evidence in its original entry/evidence order.
+func insertPGRecallPublication(
+	ctx context.Context, tx pgSessionExecer, machine string, entries []db.RecallEntry,
+) error {
+	const batchSize = 100
+	for start := 0; start < len(entries); start += batchSize {
+		batch := entries[start:min(start+batchSize, len(entries))]
+		values := make([]string, 0, len(batch))
+		args := make([]any, 0, len(batch)*26)
+		for _, entry := range batch {
+			base := len(args)
+			placeholders := make([]string, 26)
+			for i := range placeholders {
+				placeholders[i] = fmt.Sprintf("$%d", base+i+1)
+			}
+			placeholders[24] += "::timestamptz"
+			placeholders[25] += "::timestamptz"
+			values = append(values, "("+strings.Join(placeholders, ",")+")")
+			args = append(args,
+				entry.ID, machine, entry.Type, entry.Scope, entry.Status,
+				entry.ReviewState, entry.Title, entry.Body, entry.Trigger,
+				entry.Confidence, entry.Uncertainty, entry.Project, entry.CWD,
+				entry.GitBranch, entry.Agent, entry.SourceSessionID,
+				entry.SourceEpisodeID, entry.SourceRunID, entry.ExtractorMethod,
+				entry.Model, entry.Transferable, entry.ProvenanceOK,
+				entry.SupersedesEntryID, entry.SupersededByEntryID,
+				entry.CreatedAt, entry.UpdatedAt,
+			)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO recall_entries (
+				id, machine, type, scope, status, review_state, title, body,
+				trigger, confidence, uncertainty, project, cwd, git_branch,
+				agent, source_session_id, source_episode_id, source_run_id,
+				extractor_method, model, transferable, provenance_ok,
+				supersedes_entry_id, superseded_by_entry_id, created_at, updated_at
+			) VALUES `+strings.Join(values, ","), args...); err != nil {
+			return fmt.Errorf("publishing Recall entries starting at %s: %w", batch[0].ID, err)
+		}
+	}
+	values := make([]string, 0, batchSize)
+	args := make([]any, 0, batchSize*9)
+	flushEvidence := func() error {
+		if len(values) == 0 {
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO recall_evidence (
+				entry_id, session_id, message_start_ordinal,
+				message_end_ordinal, message_start_source_uuid,
+				message_end_source_uuid, content_digest, tool_use_id, snippet
+			) VALUES `+strings.Join(values, ","), args...); err != nil {
+			return fmt.Errorf("publishing Recall evidence starting at %s: %w", args[0], err)
+		}
+		clear(args)
+		args = args[:0]
+		values = values[:0]
+		return nil
+	}
+	for _, entry := range entries {
+		for _, evidence := range entry.Evidence {
+			base := len(args)
+			placeholders := make([]string, 9)
+			for i := range placeholders {
+				placeholders[i] = fmt.Sprintf("$%d", base+i+1)
+			}
+			values = append(values, "("+strings.Join(placeholders, ",")+")")
+			args = append(args,
+				entry.ID, evidence.SessionID, evidence.MessageStartOrdinal,
+				evidence.MessageEndOrdinal, evidence.MessageStartSourceUUID,
+				evidence.MessageEndSourceUUID, evidence.ContentDigest,
+				evidence.ToolUseID, evidence.Snippet,
+			)
+			if len(values) == batchSize {
+				if err := flushEvidence(); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return flushEvidence()
 }
 
 func deletePGRecallPublicationScope(
