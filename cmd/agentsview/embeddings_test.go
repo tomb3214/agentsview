@@ -1589,3 +1589,82 @@ func TestDirectListGenerationsVersionMismatchSurfacesRebuildRequired(t *testing.
 	assert.Contains(t, err.Error(), "embeddings build",
 		"the error must carry the rebuild remediation")
 }
+
+func TestBackgroundBuildDoesNotPollOrHideSubmissionErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		wantError bool
+	}{
+		{"accepted", http.StatusAccepted, false},
+		{"already running", http.StatusConflict, false},
+		{"unavailable", http.StatusServiceUnavailable, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			posts, polls := 0, 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/api/v1/embeddings/build" {
+					posts++
+					var req vector.BuildRequest
+					require.NoError(t, json.UnmarshalRead(r.Body, &req))
+					assert.True(t, req.Backstop)
+					w.WriteHeader(tc.status)
+					return
+				}
+				polls++
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer srv.Close()
+			var out bytes.Buffer
+			err := startBuildViaDaemon(context.Background(), &out,
+				embeddingsDaemonClient{baseURL: srv.URL}, vector.BuildRequest{Backstop: true})
+			if tc.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Contains(t, out.String(), "completion is pending")
+			}
+			assert.Equal(t, 1, posts)
+			assert.Zero(t, polls, "background submission must not wait for build completion")
+		})
+	}
+}
+
+func TestEmbeddingsBackgroundRequiresDaemonAndStatusDoesNotBuild(t *testing.T) {
+	dataDir := testDataDir(t)
+	writeEmbeddingsTestConfig(t, dataDir, "http://127.0.0.1:1")
+	cmd := newEmbeddingsBuildCommand()
+	cmd.SetArgs([]string{"--background"})
+	require.ErrorContains(t, cmd.Execute(), "requires a running writable daemon")
+	_, err := os.Stat(filepath.Join(dataDir, "vectors.db"))
+	assert.True(t, os.IsNotExist(err), "background refusal must not open a direct vector writer")
+	var statusCalls, buildCalls atomic.Int64
+	startEmbeddingsTestDaemon(t, dataDir, map[string]http.HandlerFunc{
+		"POST /api/v1/embeddings/build": func(w http.ResponseWriter, r *http.Request) {
+			buildCalls.Add(1)
+			var request vector.BuildRequest
+			require.NoError(t, json.UnmarshalRead(r.Body, &request))
+			assert.True(t, request.Backstop)
+			w.WriteHeader(http.StatusAccepted)
+		},
+		"GET /api/v1/embeddings/status": func(w http.ResponseWriter, r *http.Request) {
+			statusCalls.Add(1)
+			require.NoError(t, json.MarshalWrite(w, vector.BuildStatus{Running: true, BuildID: 7}))
+		},
+	})
+	cmd = newEmbeddingsBuildCommand()
+	cmd.SetArgs([]string{"--background", "--backstop"})
+	cmd.SetOut(io.Discard)
+	require.NoError(t, cmd.Execute())
+	assert.EqualValues(t, 1, buildCalls.Load())
+	assert.Zero(t, statusCalls.Load(), "background command must not poll")
+	cmd = newEmbeddingsStatusCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	require.NoError(t, cmd.Execute())
+	var status vector.BuildStatus
+	require.NoError(t, json.Unmarshal(out.Bytes(), &status))
+	assert.True(t, status.Running)
+	assert.EqualValues(t, 7, status.BuildID)
+	assert.EqualValues(t, 1, statusCalls.Load())
+}

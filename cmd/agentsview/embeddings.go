@@ -63,6 +63,7 @@ func newEmbeddingsCommand() *cobra.Command {
 		},
 	}
 	cmd.AddCommand(newEmbeddingsBuildCommand())
+	cmd.AddCommand(newEmbeddingsStatusCommand())
 	cmd.AddCommand(newEmbeddingsListCommand())
 	cmd.AddCommand(newEmbeddingsActivateCommand())
 	cmd.AddCommand(newEmbeddingsRetireCommand())
@@ -72,6 +73,7 @@ func newEmbeddingsCommand() *cobra.Command {
 // EmbeddingsBuildOptions holds the parsed `embeddings build` flags.
 type EmbeddingsBuildOptions struct {
 	Store         string
+	Background    bool
 	FullRebuild   bool
 	Backstop      bool
 	RepairInvalid bool
@@ -103,6 +105,8 @@ func newEmbeddingsBuildCommand() *cobra.Command {
 			)
 		},
 	}
+	cmd.Flags().BoolVar(&opts.Background, "background", false,
+		"Start or join a build in the running daemon without waiting for completion")
 	cmd.Flags().BoolVar(&opts.FullRebuild, "full-rebuild", false,
 		"Re-embed every document, even ones already embedded under the active generation")
 	cmd.Flags().BoolVar(&opts.Backstop, "backstop", false,
@@ -126,6 +130,37 @@ func newEmbeddingsBuildCommand() *cobra.Command {
 		"Embedding store to build (default: messages)")
 	cmd.MarkFlagsMutuallyExclusive("full-rebuild", "repair-invalid")
 	cmd.MarkFlagsMutuallyExclusive("backstop", "repair-invalid")
+	return cmd
+}
+
+// Status reads the running daemon only; it never opens the archive or starts
+// an encoder. It remains useful while a detached build is in flight.
+func newEmbeddingsStatusCommand() *cobra.Command {
+	var store string
+	cmd := &cobra.Command{
+		Use: "status", Short: "Show the daemon embedding build status as JSON",
+		SilenceUsage: true, Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := config.LoadReadOnly()
+			if err != nil {
+				return err
+			}
+			if _, err := vectorStoreSpec(store); err != nil {
+				return err
+			}
+			client, err := resolveEmbeddingsDaemonClient(cfg)
+			if err != nil {
+				return err
+			}
+			client.store = daemonEmbeddingStore(store)
+			status, err := client.status(cmd.Context())
+			if err != nil {
+				return err
+			}
+			return json.MarshalWrite(cmd.OutOrStdout(), status)
+		},
+	}
+	cmd.Flags().StringVar(&store, "store", "", "Embedding store (default: messages)")
 	return cmd
 }
 
@@ -412,7 +447,18 @@ func runEmbeddingsBuild(
 		Using:            opts.Using,
 	}
 	if IsLocalDaemonActive(cfg.DataDir, cfg.AuthToken) {
+		if opts.Background {
+			client, err := resolveEmbeddingsDaemonClient(cfg)
+			if err != nil {
+				return err
+			}
+			client.store = daemonEmbeddingStore(req.Store)
+			return startBuildViaDaemon(ctx, out, client, req)
+		}
 		return runEmbeddingsBuildDaemon(ctx, out, cfg, req)
+	}
+	if opts.Background {
+		return fmt.Errorf("background embeddings build requires a running writable daemon")
 	}
 	return runEmbeddingsBuildDirect(ctx, out, cfg, req)
 }
@@ -642,6 +688,21 @@ func buildViaDaemon(
 // pollDaemonBuildStatus polls the daemon's build status at
 // embeddingsPollInterval, printing a progress line on every poll while the
 // build is running, until it reports Running == false.
+// startBuildViaDaemon reports submission, never completion. Existing builds
+// continue under the daemon's manager without an additional encoder or waiter.
+func startBuildViaDaemon(ctx context.Context, out io.Writer, client embeddingsDaemonClient, req vector.BuildRequest) error {
+	if err := client.startBuild(ctx, req); err != nil {
+		var apiErr *daemonAPIError
+		if errors.As(err, &apiErr) && apiErr.status == http.StatusConflict {
+			fmt.Fprintln(out, "Embedding build already running in daemon; completion is pending.")
+			return nil
+		}
+		return err
+	}
+	fmt.Fprintln(out, "Embedding build accepted by daemon; completion is pending.")
+	return nil
+}
+
 func pollDaemonBuildStatus(
 	ctx context.Context, out io.Writer, client embeddingsDaemonClient,
 ) error {
