@@ -74,7 +74,9 @@ type fullPushProgressState struct {
 
 // PushResult summarizes a push sync operation.
 type PushResult struct {
-	SessionsPushed   int
+	SessionsPushed int
+	// MessagesPushed counts messages covered by changed session payloads,
+	// including existing rows retained by reconciliation, not physical row writes.
 	MessagesPushed   int
 	SkippedConflicts int
 	Errors           int
@@ -2906,10 +2908,8 @@ func (s *Sync) pushSession(
 	return nil
 }
 
-// pushMessages replaces a session's messages and tool calls
-// in PG. It skips the replacement when the PG message count
-// already matches the local count, avoiding redundant work
-// for metadata-only changes.
+// pushMessages skips unchanged session payloads and reconciles changed rows
+// against their existing keys. Explicit full publication retains replacement.
 func (s *Sync) pushMessages(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -3220,7 +3220,12 @@ func (s *Sync) pushMessages(
 		preserveResults = localResultFP == pgResultFP
 	}
 	var remainingCalls, remainingResults pgToolRows
+	var remainingMessages map[int]struct{}
 	if !full {
+		remainingMessages, err = readPGMessageOrdinals(ctx, tx, sessionID)
+		if err != nil {
+			return 0, err
+		}
 		remainingCalls, err = readPGToolRows(ctx, tx, sessionID, false)
 		if err != nil {
 			return 0, err
@@ -3252,13 +3257,13 @@ func (s *Sync) pushMessages(
 			)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM messages
-		WHERE session_id = $1
-	`, sessionID); err != nil {
-		return 0, fmt.Errorf(
-			"deleting pg messages: %w", err,
-		)
+	if full {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM messages
+			WHERE session_id = $1
+		`, sessionID); err != nil {
+			return 0, fmt.Errorf("deleting pg messages: %w", err)
+		}
 	}
 	if err := s.replaceUsageEvents(ctx, tx, sessionID); err != nil {
 		return 0, err
@@ -3291,7 +3296,7 @@ func (s *Sync) pushMessages(
 		}
 
 		if err := bulkInsertMessages(
-			ctx, tx, sessionID, msgs,
+			ctx, tx, sessionID, msgs, remainingMessages,
 		); err != nil {
 			return count, err
 		}
@@ -3311,6 +3316,9 @@ func (s *Sync) pushMessages(
 		startOrdinal = nextOrdinal
 	}
 
+	if err := deleteStalePGMessageOrdinals(ctx, tx, sessionID, remainingMessages); err != nil {
+		return count, err
+	}
 	if err := deleteStalePGToolRows(ctx, tx, sessionID, remainingCalls, false); err != nil {
 		return count, err
 	}
@@ -4045,10 +4053,51 @@ func pgUsageEventFingerprint(
 
 const msgInsertBatch = 100
 
-// bulkInsertMessages inserts messages using multi-row VALUES.
+func readPGMessageOrdinals(ctx context.Context, tx *sql.Tx, sessionID string) (map[int]struct{}, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT ordinal FROM messages WHERE session_id = $1`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("reading pg message ordinals: %w", err)
+	}
+	defer rows.Close()
+	remaining := make(map[int]struct{})
+	for rows.Next() {
+		var ordinal int
+		if err := rows.Scan(&ordinal); err != nil {
+			return nil, fmt.Errorf("reading pg message ordinal: %w", err)
+		}
+		remaining[ordinal] = struct{}{}
+	}
+	return remaining, rows.Err()
+}
+
+func deleteStalePGMessageOrdinals(ctx context.Context, tx *sql.Tx, sessionID string, remaining map[int]struct{}) error {
+	ordinals := slices.Sorted(maps.Keys(remaining))
+	for start := 0; start < len(ordinals); start += msgInsertBatch {
+		batch := ordinals[start:min(start+msgInsertBatch, len(ordinals))]
+		args := make([]any, 1, len(batch)+1)
+		args[0] = sessionID
+		var query strings.Builder
+		query.WriteString(`DELETE FROM messages WHERE session_id = $1 AND ordinal IN (`)
+		for i, ordinal := range batch {
+			if i > 0 {
+				query.WriteByte(',')
+			}
+			fmt.Fprintf(&query, "$%d", i+2)
+			args = append(args, ordinal)
+		}
+		query.WriteByte(')')
+		if _, err := tx.ExecContext(ctx, query.String(), args...); err != nil {
+			return fmt.Errorf("deleting stale pg message ordinals: %w", err)
+		}
+	}
+	return nil
+}
+
+// bulkInsertMessages uses the existing primary key to retain unchanged rows
+// during incremental publication. A nil remaining map keeps full replacement.
 func bulkInsertMessages(
 	ctx context.Context, tx *sql.Tx,
-	sessionID string, msgs []db.Message,
+	sessionID string, msgs []db.Message, remaining map[int]struct{},
 ) error {
 	for i := 0; i < len(msgs); i += msgInsertBatch {
 		end := min(i+msgInsertBatch, len(msgs))
@@ -4113,12 +4162,43 @@ func bulkInsertMessages(
 				m.IsCompactBoundary,
 			)
 		}
+		if remaining != nil {
+			b.WriteString(` ON CONFLICT (session_id, ordinal) DO UPDATE SET
+				role = EXCLUDED.role, content = EXCLUDED.content,
+				thinking_text = EXCLUDED.thinking_text, timestamp = EXCLUDED.timestamp,
+				has_thinking = EXCLUDED.has_thinking, has_tool_use = EXCLUDED.has_tool_use,
+				content_length = EXCLUDED.content_length, is_system = EXCLUDED.is_system,
+				model = EXCLUDED.model, token_usage = EXCLUDED.token_usage,
+				context_tokens = EXCLUDED.context_tokens, output_tokens = EXCLUDED.output_tokens,
+				has_context_tokens = EXCLUDED.has_context_tokens, has_output_tokens = EXCLUDED.has_output_tokens,
+				claude_message_id = EXCLUDED.claude_message_id, claude_request_id = EXCLUDED.claude_request_id,
+				source_type = EXCLUDED.source_type, source_subtype = EXCLUDED.source_subtype,
+				prompt_source = EXCLUDED.prompt_source, source_uuid = EXCLUDED.source_uuid,
+				source_parent_uuid = EXCLUDED.source_parent_uuid, is_sidechain = EXCLUDED.is_sidechain,
+				is_compact_boundary = EXCLUDED.is_compact_boundary
+			WHERE (messages.role, messages.content, messages.thinking_text, messages.timestamp,
+				messages.has_thinking, messages.has_tool_use, messages.content_length, messages.is_system,
+				messages.model, messages.token_usage, messages.context_tokens, messages.output_tokens,
+				messages.has_context_tokens, messages.has_output_tokens, messages.claude_message_id, messages.claude_request_id,
+				messages.source_type, messages.source_subtype, messages.prompt_source, messages.source_uuid,
+				messages.source_parent_uuid, messages.is_sidechain, messages.is_compact_boundary)
+			IS DISTINCT FROM
+				(EXCLUDED.role, EXCLUDED.content, EXCLUDED.thinking_text, EXCLUDED.timestamp,
+				EXCLUDED.has_thinking, EXCLUDED.has_tool_use, EXCLUDED.content_length, EXCLUDED.is_system,
+				EXCLUDED.model, EXCLUDED.token_usage, EXCLUDED.context_tokens, EXCLUDED.output_tokens,
+				EXCLUDED.has_context_tokens, EXCLUDED.has_output_tokens, EXCLUDED.claude_message_id, EXCLUDED.claude_request_id,
+				EXCLUDED.source_type, EXCLUDED.source_subtype, EXCLUDED.prompt_source, EXCLUDED.source_uuid,
+				EXCLUDED.source_parent_uuid, EXCLUDED.is_sidechain, EXCLUDED.is_compact_boundary)`)
+		}
 		if _, err := tx.ExecContext(
 			ctx, b.String(), args...,
 		); err != nil {
 			return fmt.Errorf(
 				"bulk inserting messages: %w", err,
 			)
+		}
+		for _, m := range batch {
+			delete(remaining, m.Ordinal)
 		}
 	}
 	return nil
