@@ -2,6 +2,7 @@
 /* istanbul ignore file */
 /* tslint:disable */
 /* eslint-disable */
+import type { VectorBackstopCompletion } from './VectorBackstopCompletion';
 import type { VectorBuildResult } from './VectorBuildResult';
 export type VectorBuildStatus = {
   build_id?: number;
@@ -11,6 +12,7 @@ export type VectorBuildStatus = {
   eta_milliseconds: number;
   last_error?: string;
   last_result?: VectorBuildResult;
+  last_successful_backstop?: VectorBackstopCompletion;
   model?: string;
   phase?: string;
   rate_per_second?: number;

@@ -232,6 +232,7 @@ export type { UnsupportedUsage } from './models/UnsupportedUsage';
 export type { UpdateCheckResponse } from './models/UpdateCheckResponse';
 export type { UploadSessionResponse } from './models/UploadSessionResponse';
 export type { UsageSummaryResponse } from './models/UsageSummaryResponse';
+export type { VectorBackstopCompletion } from './models/VectorBackstopCompletion';
 export type { VectorBuildResult } from './models/VectorBuildResult';
 export type { VectorBuildStatus } from './models/VectorBuildStatus';
 export type { VectorGenerationInfo } from './models/VectorGenerationInfo';
