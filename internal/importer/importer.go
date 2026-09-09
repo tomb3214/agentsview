@@ -293,12 +293,8 @@ func ImportChatGPT(
 	cb *ImportCallbacks,
 	machine ...string,
 ) (stats ImportStats, retErr error) {
-	fts := newLazyFTS(store, cb.indexing)
-	defer func() {
-		if err := fts.restore(); err != nil {
-			retErr = errors.Join(retErr, err)
-		}
-	}()
+	// Preserve ordinary FTS triggers while adding exported messages. A small
+	// import must not interrupt archive search or rebuild unrelated history.
 
 	index := BuildAssetIndex(dir)
 	resolver := &assetResolverAdapter{
@@ -403,7 +399,6 @@ func ImportChatGPT(
 					sess.UserMessageCount++
 				}
 			}
-			fts.suspend()
 			written, err := store.WriteSessionBatchAtomic([]db.SessionBatchWrite{{
 				Session: sess, Messages: msgs, ReplaceMessages: true, SkipSignalUpdates: true,
 			}})

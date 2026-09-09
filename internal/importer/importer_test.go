@@ -2,6 +2,7 @@ package importer
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -300,6 +301,85 @@ func TestImportChatGPT(t *testing.T) {
 	require.NotNil(t, s)
 	assert.Equal(t, "chatgpt.com", s.Project)
 	assert.Equal(t, "workstation", s.Machine)
+}
+
+func TestImportChatGPTKeepsFTSSearchableDuringIncrementalImport(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+	require.True(t, d.HasFTS())
+	require.NoError(t, d.UpsertSession(db.Session{
+		ID: "existing-history", Project: "existing", Agent: "claude",
+		MessageCount: 1, UserMessageCount: 1,
+	}))
+	require.NoError(t, d.ReplaceSessionMessages("existing-history", []db.Message{{
+		SessionID: "existing-history", Ordinal: 0, Role: "user",
+		Content: "unrelatedkeyword retained archive history",
+	}}))
+	priorMessages, err := d.GetAllMessages(ctx, "existing-history")
+	require.NoError(t, err)
+	priorSession, err := d.GetSession(ctx, "existing-history")
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	first := strings.ReplaceAll(testChatGPTConv, "Hello", "newkeyword first conversation")
+	second := strings.ReplaceAll(first, "cg-1", "cg-2")
+	export := strings.TrimSuffix(strings.TrimSpace(first), "]") + "," +
+		strings.TrimPrefix(strings.TrimSpace(second), "[")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "conversations-000.json"), []byte(export), 0o600))
+	assetsDir := filepath.Join(t.TempDir(), "assets")
+	indexing := 0
+	callbacks := 0
+	importCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stats, err := ImportChatGPT(importCtx, d, dir, assetsDir, &ImportCallbacks{
+		OnIndexing: func() { indexing++ },
+		OnProgress: func(progress ImportStats) {
+			callbacks++
+			assert.Equal(t, 1, progress.Imported)
+			// These reads happen before ImportChatGPT returns. A deferred
+			// whole-archive rebuild cannot make them pass retroactively.
+			for _, keyword := range []string{"unrelatedkeyword", "newkeyword"} {
+				var count int
+				err := d.Reader().QueryRowContext(ctx,
+					"SELECT count(*) FROM messages_fts WHERE messages_fts MATCH ?", keyword,
+				).Scan(&count)
+				assert.NoError(t, err)
+				assert.Equal(t, 1, count)
+			}
+			cancel() // The first conversation committed; the second has not started.
+		},
+	})
+	require.True(t, errors.Is(err, context.Canceled), "error: %v", err)
+	assert.Equal(t, 1, stats.Imported)
+	assert.Equal(t, 1, callbacks)
+	assert.Zero(t, indexing)
+
+	stats, err = ImportChatGPT(ctx, d, dir, assetsDir, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, stats.Imported)
+	assert.Equal(t, 1, stats.Skipped)
+	assert.Zero(t, stats.Errors)
+	stats, err = ImportChatGPT(ctx, d, dir, assetsDir, nil)
+	require.NoError(t, err)
+	assert.Zero(t, stats.Imported)
+	assert.Equal(t, 2, stats.Skipped)
+	for _, id := range []string{"chatgpt:cg-1", "chatgpt:cg-2"} {
+		messages, err := d.GetAllMessages(ctx, id)
+		require.NoError(t, err)
+		require.Len(t, messages, 1)
+		assert.Equal(t, "newkeyword first conversation", messages[0].Content)
+	}
+	var matches int
+	require.NoError(t, d.Reader().QueryRowContext(ctx,
+		"SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'newkeyword'",
+	).Scan(&matches))
+	assert.Equal(t, 2, matches)
+	afterMessages, err := d.GetAllMessages(ctx, "existing-history")
+	require.NoError(t, err)
+	assert.Equal(t, priorMessages, afterMessages)
+	afterSession, err := d.GetSession(ctx, "existing-history")
+	require.NoError(t, err)
+	assert.Equal(t, priorSession, afterSession)
 }
 
 func TestImportChatGPTSanitizesParserRows(t *testing.T) {
