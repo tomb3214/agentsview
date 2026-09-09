@@ -630,6 +630,7 @@ agentsview pg push [target] [flags]
 | Flag                 | Default | Description                                                    |
 | -------------------- | ------- | -------------------------------------------------------------- |
 | `--full`             | `false` | Force full local resync and re-push                            |
+| `--archive-only`     | `false` | Publish the current archive without syncing native sources    |
 | `--no-vectors`       | `false` | Skip the semantic-search vector phase for this run             |
 | `--recall-only`      | `false` | Push only Recall entries/evidence from a direct offline archive |
 | `--projects`         |         | Comma-separated projects to push (inclusive)                   |

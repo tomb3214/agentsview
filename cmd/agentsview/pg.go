@@ -22,6 +22,7 @@ import (
 
 type PGPushConfig struct {
 	Full            bool
+	ArchiveOnly     bool
 	AllTargets      bool
 	ProjectsFlag    string
 	ExcludeProjects string

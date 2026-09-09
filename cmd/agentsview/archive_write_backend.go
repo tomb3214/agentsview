@@ -498,6 +498,7 @@ func (b daemonArchiveWriteBackend) PGPush(
 		ctx, b.tr, b.appCfg.AuthToken, "/api/v1/push/pg",
 		daemonPushRequest{
 			Full:                   cfg.Full,
+			ArchiveOnly:            cfg.ArchiveOnly,
 			Projects:               projects,
 			ExcludeProjects:        excludeProjects,
 			PG:                     &target.PG,
@@ -815,7 +816,17 @@ func (b *localArchiveWriteBackend) PGPush(
 		}
 		return postgres.PushResult{}, nil
 	}
-	didResync := runLocalSyncForPGPush(ctx, b.appCfg, b.database, cfg.Full)
+	didResync := false
+	if cfg.ArchiveOnly {
+		if cfg.Full || cfg.Watch || cfg.WatchBatch != nil || cfg.WatchRecovery != nil {
+			return postgres.PushResult{}, errors.New("archive-only push cannot run full or watch synchronization")
+		}
+		if b.database.NeedsResync() {
+			return postgres.PushResult{}, errors.New("archive-only push requires a current archive data version; run sync before publishing")
+		}
+	} else {
+		didResync = runLocalSyncForPGPush(ctx, b.appCfg, b.database, cfg.Full)
+	}
 	if err := ctx.Err(); err != nil {
 		return postgres.PushResult{}, err
 	}

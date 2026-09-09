@@ -299,6 +299,13 @@ func TestPGPushWatchCommandPrefixesErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "pg push --watch: --all cannot be combined with --watch")
 }
 
+func TestPGPushArchiveOnlyRejectsSourceSyncModes(t *testing.T) {
+	for _, flag := range []string{"--full", "--watch"} {
+		_, err := executeCommand(newRootCommand(), "pg", "push", "--archive-only", flag)
+		require.ErrorContains(t, err, "--archive-only cannot be combined with --full or --watch")
+	}
+}
+
 func TestPGPushRecallOnlyRejectsWatch(t *testing.T) {
 	_, err := executeCommand(
 		newRootCommand(), "pg", "push", "--recall-only", "--watch",

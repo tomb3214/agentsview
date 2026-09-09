@@ -126,6 +126,44 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
+func TestLocalArchiveOnlyPGPushSkipsNativeSyncAndRetainsPublication(t *testing.T) {
+	for _, archiveOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("archive_only=%t", archiveOnly), func(t *testing.T) {
+			backend := testLocalArchiveWriteBackend(t)
+			nativeDir := filepath.Join(t.TempDir(), "project")
+			require.NoError(t, os.MkdirAll(nativeDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(nativeDir, "newer.jsonl"),
+				[]byte(testjsonl.NewSessionBuilder().AddClaudeUser("2024-01-01T00:00:00Z", "newer native message").String()), 0o600))
+			backend.appCfg.AgentDirs = map[parser.AgentType][]string{parser.AgentClaude: {filepath.Dir(nativeDir)}}
+			original := runLocalSyncForPGPush
+			syncCalls, pricingCalls := 0, 0
+			runLocalSyncForPGPush = func(ctx context.Context, cfg config.Config, database *db.DB, full bool) bool {
+				syncCalls++
+				return original(ctx, cfg, database, full)
+			}
+			t.Cleanup(func() { runLocalSyncForPGPush = original })
+			backend.ensurePricing = func(context.Context, *db.DB) error {
+				pricingCalls++
+				return nil
+			}
+			_, err := backend.PGPush(t.Context(), pgTargetSelection{PG: config.PGConfig{
+				URL: unreachablePGURL, AllowInsecure: true,
+			}}, PGPushConfig{ArchiveOnly: archiveOnly}, nil, nil)
+			require.Error(t, err, "the unchanged publisher must attempt the deliberately unavailable PostgreSQL target")
+			assert.Equal(t, 1, pricingCalls)
+			page, readErr := backend.database.ListSessions(t.Context(), db.SessionFilter{Limit: 10})
+			require.NoError(t, readErr)
+			if archiveOnly {
+				assert.Zero(t, syncCalls)
+				assert.Empty(t, page.Sessions)
+			} else {
+				assert.Equal(t, 1, syncCalls)
+				assert.Len(t, page.Sessions, 1)
+			}
+		})
+	}
+}
+
 func TestLocalArchiveWriteBackendPGPushStopsAfterCanceledLocalSync(t *testing.T) {
 	testLocalArchivePushStopsAfterCanceledSync(t,
 		func(backend *localArchiveWriteBackend, ctx context.Context) error {

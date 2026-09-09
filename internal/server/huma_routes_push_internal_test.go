@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -451,6 +452,108 @@ func TestPushRoutesReturn503WhileWriterClosedForSSE(t *testing.T) {
 		assert.Equal(t, "5", w.Header().Get("Retry-After"),
 			"%s: a writer-closed push must advertise Retry-After", path)
 	}
+}
+
+func TestArchiveOnlyPGPushPreservesArchiveAndWriterSerialization(t *testing.T) {
+	for _, archiveOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("archive_only=%t", archiveOnly), func(t *testing.T) {
+			f := newSyncRouteFixture(t)
+			f.writeClaudeSession(t, "project/restored.jsonl", "restored message")
+			engine := f.srv.syncEngineForLocal(f.db)
+			t.Cleanup(engine.Close)
+			require.NoError(t, f.srv.runPGPushWithSync(t.Context(), engine, f.db,
+				daemonPushRequest{}, func(bool) error { return nil }))
+			assertSessionCount(t, f.db, 1)
+			f.writeClaudeSession(t, "project/newer.jsonl", "newer native message")
+			locked, release := make(chan struct{}), make(chan struct{})
+			writerDone := make(chan error, 1)
+			go func() {
+				writerDone <- engine.RunExclusive(func() error {
+					close(locked)
+					<-release
+					return nil
+				})
+			}()
+			<-locked
+			published := make(chan int, 1)
+			done := make(chan error, 1)
+			go func() {
+				done <- f.srv.runPGPushWithSync(t.Context(), engine, f.db,
+					daemonPushRequest{ArchiveOnly: archiveOnly}, func(full bool) error {
+						assert.False(t, full)
+						assert.ErrorIs(t, engine.TryRunExclusive(func() error { return nil }), syncpkg.ErrSyncInProgress)
+						want := 2
+						if archiveOnly {
+							want = 1
+						}
+						assertSessionCount(t, f.db, want)
+						published <- want
+						return nil
+					})
+			}()
+			select {
+			case <-published:
+				t.Error("publication bypassed the current writer")
+			case <-time.After(30 * time.Millisecond):
+			}
+			close(release)
+			require.NoError(t, <-writerDone)
+			require.NoError(t, <-done)
+			assert.Len(t, published, 1)
+		})
+	}
+}
+
+func TestArchiveOnlyPGPushRejectsStaleArchiveAndCancellation(t *testing.T) {
+	f := newSyncRouteFixture(t, withStaleDB())
+	engine := f.srv.syncEngineForLocal(f.db)
+	t.Cleanup(engine.Close)
+	workCalls := 0
+	work := func(bool) error { workCalls++; return nil }
+	body := daemonPushRequest{ArchiveOnly: true}
+	err := f.srv.runPGPushWithSync(t.Context(), engine, f.db, body, work)
+	require.ErrorContains(t, err, "current archive data version")
+	assert.True(t, f.db.NeedsResync())
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err = f.srv.runPGPushWithSync(ctx, engine, f.db, body, work)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, workCalls)
+}
+
+func TestArchiveOnlyPGPushRejectsConflictingSyncBeforeStream(t *testing.T) {
+	for _, body := range []daemonPushRequest{
+		{ArchiveOnly: true, Full: true},
+		{ArchiveOnly: true, WatchBatch: &syncpkg.WatchBatch{}},
+		{ArchiveOnly: true, WatchRecovery: &syncpkg.WatchRecoveryScope{}},
+	} {
+		s := testServerWithConfig(config.Config{})
+		_, err := s.humaPGPush(t.Context(), &daemonPushInput{Body: body})
+		require.ErrorContains(t, err, "cannot run full or watch")
+	}
+}
+
+func TestArchiveOnlyPGPushHTTPReachesPublisherWithoutNativeSync(t *testing.T) {
+	f := newSyncRouteFixture(t)
+	f.writeClaudeSession(t, "project/newer.jsonl", "newer native message")
+	pricingCalls := 0
+	f.srv.ensurePricing = func(context.Context, *db.DB) error {
+		pricingCalls++
+		assertSessionCount(t, f.db, 0)
+		return nil
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/push/pg", strings.NewReader(
+		`{"full":false,"archive_only":true,"pg":{"url":"postgres://nobody:nobody@127.0.0.1:1/test?sslmode=disable","schema":"agentsview","machine_name":"test","allow_insecure":true}}`))
+	req.Host = "127.0.0.1:0"
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:0")
+	w := httptest.NewRecorder()
+	f.handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusInternalServerError, w.Code, "the deliberately unavailable publisher must fail: %s", w.Body.String())
+	assert.Equal(t, 1, pricingCalls)
+	assertSessionCount(t, f.db, 0)
+	t.Cleanup(f.srv.syncEngineForLocal(f.db).Close)
 }
 
 // TestSyncThenRunForPushWorkerRunnerRouting pins the daemon push coordinator:
