@@ -687,6 +687,9 @@ func newPGPushCommand() *cobra.Command {
 					"pg push --watch: --recall-only cannot be combined with --watch",
 				)
 			}
+			if cfg.ArchiveOnly && (cfg.Full || cfg.Watch) {
+				return fmt.Errorf("pg push: --archive-only cannot be combined with --full or --watch")
+			}
 			if cfg.Watch {
 				if err := runPGPushWatch(cfg, targetName); err != nil {
 					return fmt.Errorf("pg push --watch: %w", err)
@@ -705,6 +708,8 @@ func newPGPushCommand() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&cfg.AllTargets, "all", false, "Push every configured PG target sequentially")
 	cmd.Flags().BoolVar(&cfg.Full, "full", false, "Force full local resync and PG push")
+	cmd.Flags().BoolVar(&cfg.ArchiveOnly, "archive-only", false,
+		"Publish the current archive without syncing native sources (frozen restore publication)")
 	cmd.Flags().StringVar(&cfg.ProjectsFlag, "projects", "", "Comma-separated list of projects to push (inclusive)")
 	cmd.Flags().StringVar(&cfg.ExcludeProjects, "exclude-projects", "", "Comma-separated list of projects to exclude from push")
 	cmd.Flags().BoolVar(&cfg.AllProjects, "all-projects", false, "Ignore configured project filters for this run")

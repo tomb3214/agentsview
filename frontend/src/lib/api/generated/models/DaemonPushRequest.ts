@@ -7,6 +7,7 @@ import type { ConfigPGConfig } from './ConfigPGConfig';
 import type { SyncWatchBatch } from './SyncWatchBatch';
 import type { SyncWatchRecoveryScope } from './SyncWatchRecoveryScope';
 export type DaemonPushRequest = {
+  archive_only?: boolean;
   automatic?: boolean;
   duckdb?: ConfigDuckDBConfig;
   exclude_projects?: any[] | null;

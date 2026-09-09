@@ -149,6 +149,7 @@ type daemonPushInput struct {
 
 type daemonPushRequest struct {
 	Full                   bool                 `json:"full"`
+	ArchiveOnly            bool                 `json:"archive_only,omitzero"`
 	Projects               []string             `json:"projects,omitempty"`
 	ExcludeProjects        []string             `json:"exclude_projects,omitempty"`
 	PG                     *config.PGConfig     `json:"pg,omitempty"`
@@ -440,10 +441,34 @@ func (s *Server) syncThenRunForPush(
 	return engine.RunExclusiveFlushed(func() error { return work(true) })
 }
 
+// runPGPushWithSync preserves the normal sync-before-push path. Frozen restore
+// publication uses the same engine lock and deferred-signal flush, but never
+// ingests source files or starts a data-version rebuild.
+func (s *Server) runPGPushWithSync(
+	ctx context.Context, engine *syncpkg.Engine, local *db.DB,
+	body daemonPushRequest, work func(bool) error,
+) error {
+	if !body.ArchiveOnly {
+		return s.syncThenRunForPush(ctx, engine, local, body.Full, body.WatchBatch, body.WatchRecovery, work)
+	}
+	return engine.RunExclusiveFlushed(func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if local.NeedsResync() {
+			return errors.New("archive-only push requires a current archive data version; run sync before publishing")
+		}
+		return work(false)
+	})
+}
+
 func (s *Server) humaPGPush(
 	ctx context.Context,
 	in *daemonPushInput,
 ) (*huma.StreamResponse, error) {
+	if in.Body.ArchiveOnly && (in.Body.Full || in.Body.WatchBatch != nil || in.Body.WatchRecovery != nil) {
+		return nil, apiError(http.StatusBadRequest, "archive-only push cannot run full or watch synchronization")
+	}
 	if err := postgres.ValidateProjectFilters(
 		in.Body.Projects,
 		in.Body.ExcludeProjects,
@@ -482,8 +507,8 @@ func (s *Server) humaPGPush(
 				newPGPushProgressLogger(), streamProgress,
 			)
 			var result postgres.PushResult
-			err := s.syncThenRunForPush(
-				ctx, engine, local, body.Full, body.WatchBatch, body.WatchRecovery,
+			err := s.runPGPushWithSync(
+				ctx, engine, local, body,
 				func(forceFull bool) error {
 					if refreshErr := s.ensurePricing(ctx, local); refreshErr != nil {
 						if ctxErr := ctx.Err(); ctxErr != nil {
@@ -531,6 +556,9 @@ func (s *Server) humaDuckDBPush(
 	ctx context.Context,
 	in *daemonPushInput,
 ) (*huma.StreamResponse, error) {
+	if in.Body.ArchiveOnly {
+		return nil, apiError(http.StatusBadRequest, "archive_only is supported only for PostgreSQL publication")
+	}
 	if err := postgres.ValidateProjectFilters(
 		in.Body.Projects,
 		in.Body.ExcludeProjects,

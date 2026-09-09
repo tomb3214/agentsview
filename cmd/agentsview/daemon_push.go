@@ -18,6 +18,7 @@ import (
 
 type daemonPushRequest struct {
 	Full                   bool                 `json:"full"`
+	ArchiveOnly            bool                 `json:"archive_only,omitzero"`
 	Projects               []string             `json:"projects,omitempty"`
 	ExcludeProjects        []string             `json:"exclude_projects,omitempty"`
 	PG                     *config.PGConfig     `json:"pg,omitempty"`
@@ -58,6 +59,9 @@ func postDaemonPush[T, P any](
 	onProgress func(P),
 ) (T, error) {
 	var zero T
+	if body.ArchiveOnly && (tr.Runtime == nil || tr.Runtime.API < server.ArchiveOnlyPushAPIVersion) {
+		return zero, errors.New("archive-only push requires a daemon that supports archive-only publication; upgrade the daemon or use direct offline archive access")
+	}
 	body = daemonPushRequestForCapabilities(tr, body)
 	fallbackAttempted := false
 	for {

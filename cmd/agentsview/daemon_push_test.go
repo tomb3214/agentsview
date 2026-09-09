@@ -16,6 +16,35 @@ import (
 	syncpkg "go.kenn.io/agentsview/internal/sync"
 )
 
+func TestArchiveOnlyDaemonPushRequiresSupportAndPreservesResult(t *testing.T) {
+	attempts := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		var body daemonPushRequest
+		require.NoError(t, json.UnmarshalRead(r.Body, &body))
+		assert.True(t, body.ArchiveOnly)
+		assert.False(t, body.Full)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"SessionsPushed":2,"MessagesPushed":3}`))
+	}))
+	t.Cleanup(ts.Close)
+	for _, runtime := range []*DaemonRuntime{nil, {API: server.ArchiveOnlyPushAPIVersion - 1}} {
+		_, err := postDaemonPush[postgres.PushResult, postgres.PushProgress](
+			t.Context(), transport{URL: ts.URL, Runtime: runtime}, "", "/api/v1/push/pg",
+			daemonPushRequest{ArchiveOnly: true}, nil)
+		require.ErrorContains(t, err, "requires a daemon")
+	}
+	assert.Zero(t, attempts, "no request may reach an unsupported daemon")
+	backend := daemonArchiveWriteBackend{tr: transport{
+		URL: ts.URL, Runtime: &DaemonRuntime{API: server.ArchiveOnlyPushAPIVersion},
+	}}
+	result, err := backend.PGPush(t.Context(), pgTargetSelection{}, PGPushConfig{ArchiveOnly: true}, nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 2, result.SessionsPushed)
+	assert.Equal(t, 3, result.MessagesPushed)
+	assert.Equal(t, 1, attempts)
+}
+
 func TestParseDaemonPushSSE(t *testing.T) {
 	stream := func(events ...string) string {
 		return strings.Join(events, "")

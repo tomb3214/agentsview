@@ -54,6 +54,17 @@ This one-shot command syncs all local sessions, messages, and tool
 calls to PostgreSQL. The schema is created automatically on first
 push.
 
+For a restored archive that must be published before ingesting newer native
+files, use `agentsview pg push --archive-only`. This keeps the normal project
+filters, revision comparisons, checkpoints, Recall publication, and vector
+readiness checks. It takes the same archive writer ownership and daemon sync
+lock as ordinary publication; it does not freeze other writers or create a
+snapshot. Quiesce other ingestion when an exact restored boundary is required.
+An archive requiring a data-version resync is rejected rather than rebuilt.
+The option cannot be combined with `--full` or `--watch`, and daemon delegation
+requires a daemon supporting archive-only publication (API version 8 or later).
+Without this option, the command still syncs native sources before publishing.
+
 To keep PostgreSQL current automatically, run the foreground watcher:
 
 ```bash
@@ -94,6 +105,7 @@ agentsview pg push [target] [flags]
 |------|---------|-------------|
 | `--all` | `false` | Push every configured PG target sequentially |
 | `--full` | `false` | Force full local resync and re-push, bypassing change detection |
+| `--archive-only` | `false` | Publish the current archive without ingesting native sources |
 | `--no-vectors` | `false` | Skip the semantic-search vector phase for this run |
 | `--recall-only` | `false` | Publish only Recall entries and evidence from a direct offline archive; refuses daemon delegation |
 | `--projects` | | Comma-separated projects to push (inclusive) |
