@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS vector_push_state (
     generation_id BIGINT NOT NULL,
     session_id    TEXT NOT NULL,
     doc_agg_hash  TEXT NOT NULL,
+    source_revision TEXT,
     PRIMARY KEY (generation_id, session_id)
 );
 `
@@ -133,12 +134,27 @@ func ensureVectorBaseSchemaPG(ctx context.Context, pg *sql.DB) (string, error) {
 		return reason, nil
 	}
 	if vectorBaseSchemaReady(ctx, pg) {
-		return "", nil
+		return "", ensureVectorSourceRevision(ctx, pg)
 	}
 	if _, err := pg.ExecContext(ctx, vectorBaseDDL); err != nil {
 		return "", fmt.Errorf("creating vector base schema: %w", err)
 	}
 	return "", nil
+}
+
+// ensureVectorSourceRevision is the additive central-producer migration. A
+// provisioned ingest role takes the read-only probe; only the schema owner can
+// migrate an old substrate. Existing publication state remains intact.
+func ensureVectorSourceRevision(ctx context.Context, pg *sql.DB) error {
+	var ready bool
+	if err := pg.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='vector_push_state' AND column_name='source_revision')`).Scan(&ready); err != nil {
+		return err
+	}
+	if ready {
+		return nil
+	}
+	_, err := pg.ExecContext(ctx, `ALTER TABLE vector_push_state ADD COLUMN IF NOT EXISTS source_revision TEXT`)
+	return err
 }
 
 // vectorBaseSchemaReady reports whether a privileged migration has already

@@ -28,6 +28,7 @@ func newPGVectorsCommand() *cobra.Command {
 			return cmd.Help()
 		},
 	}
+	cmd.AddCommand(newPGVectorsBuildCommand())
 	cmd.AddCommand(newPGVectorsListCommand())
 	cmd.AddCommand(newPGVectorsDropCommand())
 	return cmd

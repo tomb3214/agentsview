@@ -504,6 +504,16 @@ func (db *DB) ScanEmbeddableUnits(
 	return maxEnded, nil
 }
 
+// ReduceEmbeddingRows shares the archive's run grouping with relational producers.
+// Rows must use ScanEmbeddableUnits' nine-column shape and session/ordinal order.
+func ReduceEmbeddingRows(rows *sql.Rows, fn func(EmbeddableUnit) error) error {
+	red := &unitReducer{fn: fn}
+	if _, err := reduceUnitRows(rows, red); err != nil {
+		return err
+	}
+	return red.finish()
+}
+
 // reduceUnitRows scans every row of an open ScanEmbeddableUnits query into
 // red, tracking the chronologically latest sessions.ended_at seen across
 // them. It does not flush red's final open run -- callers must call
