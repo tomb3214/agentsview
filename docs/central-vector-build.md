@@ -1,4 +1,7 @@
-# Central message embeddings
+---
+title: Central Message Embeddings
+description: Build bounded resumable vectors from current PostgreSQL source sessions
+---
 
 `agentsview pg vectors build --target <existing-target> --machine <source-machine>`
 encodes a finite pass of sessions already published to PostgreSQL. The machine
