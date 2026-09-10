@@ -1108,7 +1108,7 @@ func (s *Sync) pushVectorSession(
 INSERT INTO vector_push_state (generation_id, session_id, doc_agg_hash)
 VALUES ($1, $2, $3)
 ON CONFLICT (generation_id, session_id)
-DO UPDATE SET doc_agg_hash = EXCLUDED.doc_agg_hash`,
+DO UPDATE SET doc_agg_hash = EXCLUDED.doc_agg_hash, source_revision = NULL`,
 		scope.gen.id, sessionID, aggHash); err != nil {
 		return vectorSessionOutcome{}, fmt.Errorf(
 			"upserting vector push state %s: %w", sessionID, err)

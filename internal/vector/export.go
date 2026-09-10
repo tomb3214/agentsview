@@ -422,6 +422,9 @@ func writeEmbeddedDocIdentity(h hash.Hash, d ExportDoc) {
 	h.Write([]byte{'\n'})
 }
 
+// AggregateEmbeddedDocHash returns the canonical publication identity of docs.
+func AggregateEmbeddedDocHash(docs []ExportDoc) string { return aggregateEmbeddedDocHash(docs) }
+
 // aggregateEmbeddedDocHash computes the SessionEmbeddedDocHashes value for one
 // exported doc set: the docs hashed in doc_key order. An empty set yields "",
 // matching the session's absence from the SessionEmbeddedDocHashes map.
