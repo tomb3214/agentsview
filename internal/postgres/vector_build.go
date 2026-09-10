@@ -113,7 +113,14 @@ func BuildCentralVectors(ctx context.Context, pg *sql.DB, o VectorBuildOptions) 
 	if err != nil {
 		return r, err
 	}
-	syncer := &Sync{pg: pg}
+	var schema string
+	if err = lease.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
+		return r, fmt.Errorf("resolving central vector schema: %w", err)
+	}
+	if schema == "" {
+		return r, errors.New("central vector schema must not be empty")
+	}
+	syncer := &Sync{pg: pg, schema: schema}
 	all, err := syncer.allVectorGenerationIDs(ctx)
 	if err != nil {
 		return r, err
@@ -217,7 +224,7 @@ func centralVectorSource(ctx context.Context, pg *sql.DB, sid string, o VectorBu
 	if err != nil {
 		return nil, "", err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	err = tx.QueryRowContext(ctx, `SELECT `+vectorSourceRevision+` FROM sessions s WHERE s.id=$1 AND s.machine=$2 AND s.deleted_at IS NULL AND ($3 OR NOT s.is_automated)`, sid, o.Machine, o.IncludeAutomated).Scan(&rev)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, "", nil
@@ -330,7 +337,7 @@ func installCentralVectors(ctx context.Context, conn *sql.Conn, gen vectorGenera
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var current string
 	err = tx.QueryRowContext(ctx, `SELECT `+vectorSourceRevision+` FROM sessions s WHERE s.id=$1 AND s.machine=$2 AND s.deleted_at IS NULL AND ($3 OR NOT s.is_automated) FOR UPDATE`, sid, o.Machine, o.IncludeAutomated).Scan(&current)
 	if errors.Is(err, sql.ErrNoRows) {
