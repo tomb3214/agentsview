@@ -158,6 +158,10 @@ func TestCentralVectorSourceRLSRemainsAuthoritative(t *testing.T) {
 	_, err = pg.Exec(`CREATE ROLE ` + role + ` NOLOGIN`)
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = pg.Exec(`DROP OWNED BY ` + role); _, _ = pg.Exec(`DROP ROLE ` + role) })
+	extSchema, err := vectorExtensionSchema(ctx, pg)
+	require.NoError(t, err)
+	_, err = pg.Exec(`GRANT USAGE ON SCHEMA ` + extSchema + ` TO ` + role)
+	require.NoError(t, err)
 	_, err = pg.Exec(`GRANT USAGE ON SCHEMA ` + schema + ` TO ` + role + `; GRANT SELECT ON ALL TABLES IN SCHEMA ` + schema + ` TO ` + role + `; GRANT UPDATE ON sessions TO ` + role + `; GRANT INSERT,UPDATE,DELETE ON vector_documents,vector_push_state,vector_generation_machines,` + vectorChunkTable(id) + ` TO ` + role)
 	require.NoError(t, err)
 	for _, table := range []string{"sessions", "messages", "vector_documents", "vector_push_state", "vector_generation_machines", vectorChunkTable(id)} {
