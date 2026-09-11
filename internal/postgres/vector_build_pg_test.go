@@ -15,6 +15,69 @@ import (
 	"time"
 )
 
+func TestCentralVectorCompletesSourcePastBudgetAndHonorsCancellation(t *testing.T) {
+	ctx := context.Background()
+	syncer, local, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_central_budget_test")
+	seedVectorSession(t, local, "a")
+	seedVectorSession(t, local, "b")
+	_, err := syncer.Push(ctx, false, nil)
+	require.NoError(t, err)
+	_, err = pg.Exec(`ALTER TABLE vector_push_state ADD COLUMN IF NOT EXISTS source_revision TEXT;
+		UPDATE sessions SET updated_at='2026-01-01T00:00:00Z';
+		UPDATE messages SET content=repeat('x',20000) WHERE session_id='a'`)
+	require.NoError(t, err)
+	gen := kitvec.Generation{Model: "test-model", Dimensions: 4, Params: map[string]string{"max_input_chars": "8192", "doc_unit_scheme": "run_v1", "chunk_overlap_chars": "1228"}}
+	id, err := ensureVectorGeneration(ctx, pg, gen.Fingerprint(), gen.Model, gen.Dimensions)
+	require.NoError(t, err)
+	require.NoError(t, ensureVectorChunkTable(ctx, pg, id, 4))
+	encode := func(ctx context.Context, texts []string) ([][]float32, error) {
+		select {
+		case <-time.After(100 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		vectors := make([][]float32, len(texts))
+		for i := range vectors {
+			vectors[i] = []float32{1, 0, 0, 0}
+		}
+		return vectors, nil
+	}
+	o := VectorBuildOptions{Machine: "test-machine", Generation: gen, MaxSources: 10, MaxChunks: 1, BatchSize: 4, MaxInputChars: 8192, MaxSourceBytes: 1 << 20, Timeout: 50 * time.Millisecond, HardTimeout: 2 * time.Second, Encode: encode}
+	first, err := BuildCentralVectors(ctx, pg, o)
+	require.NoError(t, err)
+	require.Equal(t, 1, first.Published)
+	require.Greater(t, first.Chunks, o.MaxChunks)
+	require.True(t, first.BoundReached)
+	started := false
+	o.Encode = func(c context.Context, _ []string) ([][]float32, error) {
+		started = true
+		<-c.Done()
+		return nil, c.Err()
+	}
+	stalled, err := BuildCentralVectors(ctx, pg, o)
+	require.True(t, started)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Zero(t, stalled.Published)
+	cancelCtx, cancel := context.WithCancel(ctx)
+	o.Encode = func(c context.Context, texts []string) ([][]float32, error) {
+		cancel()
+		return encode(c, texts)
+	}
+	interrupted, err := BuildCentralVectors(cancelCtx, pg, o)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, interrupted.Published)
+	var checkpoints int
+	require.NoError(t, pg.QueryRow(`SELECT count(*) FROM vector_push_state WHERE generation_id=$1`, id).Scan(&checkpoints))
+	require.Equal(t, 1, checkpoints)
+	o.Encode = encode
+	next, err := BuildCentralVectors(ctx, pg, o)
+	require.NoError(t, err)
+	require.Equal(t, 1, next.Published)
+	noop, err := BuildCentralVectors(ctx, pg, o)
+	require.NoError(t, err)
+	require.Zero(t, noop.Examined)
+}
+
 func TestCentralVectorBuildResumeDriftReuseAndOwnership(t *testing.T) {
 	ctx := context.Background()
 	syncer, local, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_central_build_test")

@@ -24,6 +24,7 @@ type VectorBuildOptions struct {
 	Generation                                                      kitvec.Generation
 	MaxSources, MaxChunks, BatchSize, MaxInputChars, MaxSourceBytes int
 	Timeout                                                         time.Duration
+	HardTimeout                                                     time.Duration
 	IncludeAutomated                                                bool
 	Encode                                                          kitvec.EncodeFunc
 }
@@ -48,7 +49,17 @@ func BuildCentralVectors(ctx context.Context, pg *sql.DB, o VectorBuildOptions) 
 	if o.Generation.Params["max_input_chars"] != strconv.Itoa(o.MaxInputChars) || o.Generation.Params["doc_unit_scheme"] != "run_v1" || o.Generation.Params["chunk_overlap_chars"] != strconv.Itoa(avvec.ChunkOverlap(o.MaxInputChars)) {
 		return r, errors.New("chunk recipe differs from generation")
 	}
-	ctx, cancel := context.WithTimeout(ctx, o.Timeout)
+	// The normal budget yields between complete sources. A separate hard
+	// deadline and caller cancellation still bound an unresponsive attempt.
+	budgetEnd := time.Now().Add(o.Timeout)
+	hardTimeout := o.HardTimeout
+	if hardTimeout == 0 {
+		hardTimeout = o.Timeout
+	}
+	if hardTimeout < o.Timeout {
+		return r, errors.New("hard timeout must be at least the pass budget")
+	}
+	ctx, cancel := context.WithTimeout(ctx, hardTimeout)
 	defer cancel()
 	id, dim, ok, err := LookupVectorGeneration(ctx, pg, o.Generation.Fingerprint())
 	if err != nil {
@@ -133,6 +144,10 @@ func BuildCentralVectors(ctx context.Context, pg *sql.DB, o VectorBuildOptions) 
 		if err = ctx.Err(); err != nil {
 			return r, err
 		}
+		if r.Examined > 0 && !time.Now().Before(budgetEnd) {
+			r.BoundReached = true
+			break
+		}
 		// A dead advisory-lock connection must never continue via another pool conn.
 		if err = lease.PingContext(ctx); err != nil {
 			return r, err
@@ -160,10 +175,9 @@ func BuildCentralVectors(ctx context.Context, pg *sql.DB, o VectorBuildOptions) 
 			for _, d := range docs {
 				needed += len(kitvec.Split(d.Content, kitvec.SplitOptions{MaxRunes: o.MaxInputChars, Overlap: avvec.ChunkOverlap(o.MaxInputChars)}))
 			}
-			if needed > o.MaxChunks {
-				return r, errors.New("source exceeds max-chunks; increase explicit bound to admit it")
-			}
-			if needed > o.MaxChunks-r.Chunks {
+			// Admit one complete source even when it exceeds the normal chunk
+			// budget; otherwise that source can never acquire a checkpoint.
+			if r.Chunks > 0 && needed > o.MaxChunks-r.Chunks {
 				r.BoundReached = true
 				break
 			}
