@@ -155,7 +155,7 @@ func BuildCentralVectors(ctx context.Context, pg *sql.DB, o VectorBuildOptions) 
 		if err != nil {
 			return r, err
 		}
-		if !reuse {
+		if !reuse && docs != nil {
 			needed := 0
 			for _, d := range docs {
 				needed += len(kitvec.Split(d.Content, kitvec.SplitOptions{MaxRunes: o.MaxInputChars, Overlap: avvec.ChunkOverlap(o.MaxInputChars)}))
