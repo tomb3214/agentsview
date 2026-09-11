@@ -9,8 +9,8 @@ import (
 	"go.kenn.io/agentsview/internal/export"
 )
 
-// SessionBatchWrite is one full session rewrite for a bulk
-// rebuild. Callers must provide a complete session row, the
+// SessionBatchWrite is one complete session write for bulk
+// ingestion. Callers must provide a complete session row, the
 // complete message set to store, the computed signal values,
 // and the data version to stamp after messages are written.
 type SessionBatchWrite struct {
@@ -92,9 +92,10 @@ type transactionQueries interface {
 // single bad row rolls back only that session and does not
 // poison the rest of the batch.
 //
-// This is intended for full-resync temp databases, where there
-// are no user pins to preserve yet. Use ReplaceSessionMessages
-// for ordinary single-session replacement on a live database.
+// Identical persisted message rows are retained on replacement;
+// changed message sets use the full replacement and pin-remapping
+// path. Use ReplaceSessionMessages for ordinary single-session
+// replacement on a live database.
 func (db *DB) WriteSessionBatch(
 	writes []SessionBatchWrite,
 ) (SessionBatchResult, error) {
@@ -461,6 +462,7 @@ func writeOneSessionBatchTx(
 	}
 	sessionExists := !upsertResult.inserted
 	replacementTranscriptChanged := false
+	messageRowsUnchanged := false
 	if replaceMessages && sessionExists {
 		stored, err := sessionMessagesTx(
 			ctx, tx, write.Session.ID,
@@ -479,6 +481,11 @@ func writeOneSessionBatchTx(
 		replacementTranscriptChanged = !transcriptMessagesEqual(
 			stored, write.Messages,
 		)
+		// A required full parse need not rewrite identical persisted rows.
+		// Transcript equality alone is insufficient: it omits metadata that
+		// still needs to be stored. Reuse the ordinary replacement comparator.
+		plan, comparable := planSessionMessageDiff(stored, write.Messages)
+		messageRowsUnchanged = comparable && len(plan.updates) == 0 && len(plan.inserts) == 0
 	}
 
 	if write.IdentityObservation.Project != "" {
@@ -518,7 +525,9 @@ func writeOneSessionBatchTx(
 
 	msgs := write.Messages
 	var pins []savedPin
-	if replaceMessages && sessionExists {
+	if messageRowsUnchanged {
+		msgs = nil
+	} else if replaceMessages && sessionExists {
 		pins, err = savePinsTx(queries, write.Session.ID)
 		if err != nil {
 			return 0, err
@@ -572,10 +581,12 @@ func writeOneSessionBatchTx(
 		}
 	}
 	if replaceMessages {
-		if err := restorePinsTx(
-			queries, write.Session.ID, pins,
-		); err != nil {
-			return 0, err
+		if !messageRowsUnchanged {
+			if err := restorePinsTx(
+				queries, write.Session.ID, pins,
+			); err != nil {
+				return 0, err
+			}
 		}
 		// A full message replacement re-normalizes every row, so this row is
 		// no longer incremental-append skew. The append-only branch
