@@ -128,6 +128,73 @@ func TestCentralVectorGroupingMatchesArchive(t *testing.T) {
 	}
 }
 
+func TestCentralVectorBuildBatchesAcrossDocuments(t *testing.T) {
+	ctx := context.Background()
+	syncer, local, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_central_batch_test")
+	seedVectorSession(t, local, "batch")
+	require.NoError(t, local.InsertMessages([]db.Message{
+		{SessionID: "batch", Ordinal: 1, Role: "assistant", SourceUUID: "reply", Content: "First response"},
+		{SessionID: "batch", Ordinal: 2, Role: "user", Content: "Next question"},
+		{SessionID: "batch", Ordinal: 3, Role: "assistant", SourceUUID: "reply-2", Content: "Second response"},
+		{SessionID: "batch", Ordinal: 4, Role: "user", Content: "Last question"},
+	}))
+	_, err := syncer.Push(ctx, false, nil)
+	require.NoError(t, err)
+	gen := kitvec.Generation{Model: "batch-model", Dimensions: 4, Params: map[string]string{"max_input_chars": "8192", "doc_unit_scheme": "run_v1", "chunk_overlap_chars": "1228"}}
+	id, err := ensureVectorGeneration(ctx, pg, gen.Fingerprint(), gen.Model, 4)
+	require.NoError(t, err)
+	require.NoError(t, ensureVectorChunkTable(ctx, pg, id, 4))
+	o := VectorBuildOptions{Machine: "test-machine", Generation: gen, MaxSources: 1, MaxChunks: 20, BatchSize: 4, MaxInputChars: 8192, MaxSourceBytes: 1 << 20, Timeout: time.Minute}
+	docs, _, err := centralVectorSource(ctx, pg, "batch", o)
+	require.NoError(t, err)
+	require.Len(t, docs, 5)
+	var batches []int
+	encoded := 0
+	o.Encode = func(_ context.Context, texts []string) ([][]float32, error) {
+		batches = append(batches, len(texts))
+		vectors := make([][]float32, len(texts))
+		for i, text := range texts {
+			require.Equal(t, docs[encoded].Content, text)
+			encoded++
+			vectors[i] = []float32{1, float32(encoded), 0, 0}
+		}
+		return vectors, nil
+	}
+	encode := o.Encode
+	failSecondBatch := true
+	o.Encode = func(c context.Context, texts []string) ([][]float32, error) {
+		if encoded > 0 && failSecondBatch {
+			return nil, errors.New("second batch interrupted")
+		}
+		return encode(c, texts)
+	}
+	failed, err := BuildCentralVectors(ctx, pg, o)
+	require.ErrorContains(t, err, "second batch interrupted")
+	assert.Zero(t, failed.Published)
+	assert.Zero(t, countRows(t, pg, `SELECT COUNT(*) FROM vector_documents WHERE session_id='batch'`))
+	assert.Zero(t, countRows(t, pg, `SELECT COUNT(*) FROM vector_push_state WHERE session_id='batch'`))
+	failSecondBatch = false
+	encoded = 0
+	batches = nil
+	result, err := BuildCentralVectors(ctx, pg, o)
+	require.NoError(t, err)
+	assert.Equal(t, []int{4, 1}, batches)
+	assert.Equal(t, 2, result.Requests)
+	assert.Equal(t, 5, result.Chunks)
+	assert.Equal(t, 1, result.Published)
+	for i, doc := range docs {
+		var actual string
+		require.NoError(t, pg.QueryRow(`SELECT embedding::text FROM `+vectorChunkTable(id)+` WHERE doc_key=$1 AND chunk_index=0`, doc.DocKey).Scan(&actual))
+		expected, err := halfvecLiteral([]float32{1, float32(i + 1), 0, 0})
+		require.NoError(t, err)
+		assert.Equal(t, expected, actual)
+	}
+	noop, err := BuildCentralVectors(ctx, pg, o)
+	require.NoError(t, err)
+	assert.Zero(t, noop.Examined)
+	assert.Equal(t, []int{4, 1}, batches)
+}
+
 func TestCentralVectorCheckpointMigrationPreservesState(t *testing.T) {
 	ctx := context.Background()
 	_, _, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_central_migrate_test")

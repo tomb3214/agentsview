@@ -1760,6 +1760,9 @@ func TestManagerContinuesWhenCredentialFindingAppearsMidExtraction(t *testing.T)
 	if result.Failed != 0 {
 		t.Fatalf("result = %+v, credential finding must not fail extraction", result)
 	}
+	// Separate the retry cutoff from the concurrent metadata write, as a
+	// normal scheduled pass does after the session settles.
+	settleSessionWrite()
 	result, err = m.RunPass(ctx, PassOptions{Full: true})
 	if err != nil {
 		t.Fatalf("RunPass retry: %v", err)

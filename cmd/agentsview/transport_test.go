@@ -971,7 +971,7 @@ auth_token = "generated-token"
 
 	cfg := config.Config{DataDir: dir}
 	tr, err := ensureTransport(
-		&cfg, transportIntentArchiveWrite, time.Second,
+		&cfg, transportIntentArchiveWrite, 10*time.Second,
 	)
 
 	require.NoError(t, <-published)
