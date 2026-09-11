@@ -167,39 +167,50 @@ func BuildCentralVectors(ctx context.Context, pg *sql.DB, o VectorBuildOptions) 
 				r.BoundReached = true
 				break
 			}
+			// Fill batches across documents while retaining the source as the
+			// atomic publication and revision-check boundary.
+			type inputChunk struct {
+				docIndex, chunkIndex int
+				text                 string
+			}
+			inputs := make([]inputChunk, 0, needed)
 			for i := range docs {
 				parts := kitvec.Split(docs[i].Content, kitvec.SplitOptions{MaxRunes: o.MaxInputChars, Overlap: avvec.ChunkOverlap(o.MaxInputChars)})
-				for start := 0; start < len(parts); start += o.BatchSize {
-					end := min(start+o.BatchSize, len(parts))
-					texts := make([]string, end-start)
-					for j, p := range parts[start:end] {
-						texts[j] = p.Text
+				for _, part := range parts {
+					inputs = append(inputs, inputChunk{i, part.Index, part.Text})
+				}
+			}
+			for start := 0; start < len(inputs); start += o.BatchSize {
+				end := min(start+o.BatchSize, len(inputs))
+				texts := make([]string, end-start)
+				for j, input := range inputs[start:end] {
+					texts[j] = input.text
+				}
+				r.Requests++
+				vectors, e := o.Encode(ctx, texts)
+				if e != nil {
+					return r, e
+				}
+				if len(vectors) != len(texts) {
+					return r, errors.New("encoder returned wrong vector count")
+				}
+				for j, v := range vectors {
+					if len(v) != dim {
+						return r, errors.New("encoder returned wrong vector dimension")
 					}
-					r.Requests++
-					vectors, e := o.Encode(ctx, texts)
-					if e != nil {
+					norm := 0.0
+					for _, x := range v {
+						norm += float64(x) * float64(x)
+					}
+					if norm == 0 || math.IsInf(norm, 0) || math.IsNaN(norm) {
+						return r, errors.New("encoder returned invalid vector norm")
+					}
+					if _, e = halfvecLiteral(v); e != nil {
 						return r, e
 					}
-					if len(vectors) != len(texts) {
-						return r, errors.New("encoder returned wrong vector count")
-					}
-					for j, v := range vectors {
-						if len(v) != dim {
-							return r, errors.New("encoder returned wrong vector dimension")
-						}
-						norm := 0.0
-						for _, x := range v {
-							norm += float64(x) * float64(x)
-						}
-						if norm == 0 || math.IsInf(norm, 0) || math.IsNaN(norm) {
-							return r, errors.New("encoder returned invalid vector norm")
-						}
-						if _, e = halfvecLiteral(v); e != nil {
-							return r, e
-						}
-						docs[i].Chunks = append(docs[i].Chunks, VectorPushChunk{ChunkIndex: parts[start+j].Index, Embedding: v})
-						r.Chunks++
-					}
+					input := inputs[start+j]
+					docs[input.docIndex].Chunks = append(docs[input.docIndex].Chunks, VectorPushChunk{ChunkIndex: input.chunkIndex, Embedding: v})
+					r.Chunks++
 				}
 			}
 		}
