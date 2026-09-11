@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,6 +12,62 @@ import (
 
 	"go.kenn.io/agentsview/internal/db"
 )
+
+func TestPGSearchDeferredUnicodeSnippetsAndPage(t *testing.T) {
+	pgURL := testPGURL(t)
+	ensureStoreSchema(t, pgURL)
+	store, err := NewStore(pgURL, testSchema, true)
+	require.NoError(t, err)
+	defer store.Close()
+	const query = "pagedneedle"
+	early := query + " " + strings.Repeat("é", 1000)
+	late := strings.Repeat("界", 120) + query + strings.Repeat("é", 1000)
+	for _, row := range []struct{ id, project, name, body string }{
+		{"snippet-early", "snippet-project", "early", early},
+		{"snippet-late", "snippet-project", "late", late},
+		{"snippet-name", "snippet-project", query + " title", "ordinary content"},
+		{"snippet-system", "snippet-project", query + " hidden", "\u2000<goal_context>" + query},
+		{"snippet-other", "other-project", "other", query},
+	} {
+		_, err = store.pg.Exec(`INSERT INTO sessions
+			(id,machine,project,agent,display_name,started_at,message_count,user_message_count)
+			VALUES($1,'fixture-machine',$2,'fixture-agent',$3,'2026-01-01T00:00:00Z',1,1)`,
+			row.id, row.project, row.name)
+		require.NoError(t, err)
+		_, err = store.pg.Exec(`INSERT INTO messages
+			(session_id,ordinal,role,content,content_length)
+			VALUES($1,3,'user',$2,$3)`, row.id, row.body, len(row.body))
+		require.NoError(t, err)
+	}
+	// A later-position message must not replace the per-session winner.
+	_, err = store.pg.Exec(`INSERT INTO messages
+		(session_id,ordinal,role,content,content_length)
+		VALUES('snippet-early',1,'user',$1,$2)`, "prefix "+query, len("prefix "+query))
+	require.NoError(t, err)
+	filter := db.SearchFilter{Query: query, Project: "snippet-project", Limit: 1}
+	first, err := store.Search(context.Background(), filter)
+	require.NoError(t, err)
+	require.Len(t, first.Results, 1)
+	assert.Equal(t, "snippet-early", first.Results[0].SessionID)
+	assert.Equal(t, 3, first.Results[0].Ordinal)
+	assert.Equal(t, string([]rune(early)[:200])+"...", first.Results[0].Snippet)
+	require.Equal(t, 1, first.NextCursor)
+	filter.Cursor = first.NextCursor
+	second, err := store.Search(context.Background(), filter)
+	require.NoError(t, err)
+	require.Len(t, second.Results, 1)
+	assert.Equal(t, "snippet-late", second.Results[0].SessionID)
+	assert.Equal(t, "..."+string([]rune(late)[70:270])+"...", second.Results[0].Snippet)
+	require.Equal(t, 2, second.NextCursor)
+	filter.Cursor = second.NextCursor
+	last, err := store.Search(context.Background(), filter)
+	require.NoError(t, err)
+	require.Len(t, last.Results, 1)
+	assert.Equal(t, "snippet-name", last.Results[0].SessionID)
+	assert.Equal(t, -1, last.Results[0].Ordinal)
+	assert.Equal(t, query+" title", last.Results[0].Snippet)
+	assert.Zero(t, last.NextCursor)
+}
 
 func TestStoreSearchILIKE(t *testing.T) {
 	pgURL := testPGURL(t)

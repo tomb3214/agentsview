@@ -84,6 +84,17 @@ func PostgresSystemPrefixSQL(contentCol, roleCol string) string {
 	return systemPrefixSQL(contentCol, roleCol, systemPrefixPostgres)
 }
 
+// PostgresSystemPrefixSQLFromTrimmed reuses a query's already-trimmed text.
+// The caller must compute trimmedCol with SystemPrefixTrimSQL.
+func PostgresSystemPrefixSQLFromTrimmed(trimmedCol, roleCol string) string {
+	return systemPrefixSQLWithTrimmed("", roleCol, trimmedCol, systemPrefixPostgres)
+}
+
+// SystemPrefixTrimSQL applies the whitespace contract shared by prefix filters.
+func SystemPrefixTrimSQL(contentCol string) string {
+	return systemPrefixSQLTrimmed(contentCol)
+}
+
 // DuckDBSystemPrefixSQL is the DuckDB form of SystemPrefixSQL.
 func DuckDBSystemPrefixSQL(contentCol, roleCol string) string {
 	return systemPrefixSQL(contentCol, roleCol, systemPrefixDuckDB)
@@ -99,6 +110,12 @@ func systemPrefixSQL(
 	// U+2029, U+202F, U+205F, U+3000). SQLite, PostgreSQL, and DuckDB
 	// handle multi-byte UTF-8 characters in the trim set correctly.
 	trimmed := systemPrefixSQLTrimmed(contentCol)
+	return systemPrefixSQLWithTrimmed(contentCol, roleCol, trimmed, dialect)
+}
+
+func systemPrefixSQLWithTrimmed(
+	contentCol, roleCol, trimmed string, dialect systemPrefixSQLDialect,
+) string {
 	parts := make([]string, 0, len(SystemMsgPrefixes)+1)
 	for _, p := range SystemMsgPrefixes {
 		parts = append(parts, fmt.Sprintf(

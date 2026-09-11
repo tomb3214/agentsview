@@ -381,6 +381,12 @@ func (s *Store) Search(
 	if f.Sort == "recency" {
 		outerOrderBy = "session_ended_at DESC NULLS LAST, session_id ASC"
 	}
+	pageOrderBy := strings.NewReplacer(
+		"match_priority", "page.match_priority",
+		"match_pos", "page.match_pos",
+		"session_ended_at", "page.session_ended_at",
+		"session_id", "page.session_id",
+	).Replace(outerOrderBy)
 
 	// $1 = escaped ILIKE pattern for the name branch (full plain term)
 	// $2 = raw first term (for POSITION — case folded in expression)
@@ -408,36 +414,36 @@ func (s *Store) Search(
 		argIdx++
 	}
 
+	// OFFSET 0 keeps the per-row text projection from being flattened and
+	// recomputed for each prefix test. Materialize ranking metadata, not the
+	// large normalized bodies; fetch snippet text only for the selected page.
 	query := fmt.Sprintf(`
-		WITH msg_matches AS (
-			SELECT DISTINCT ON (m.session_id)
+		WITH candidates AS MATERIALIZED (
+			SELECT
 				m.session_id,
 				s.project,
 				s.agent,
 				COALESCE(s.display_name, s.session_name, s.first_message, '') AS name,
 				COALESCE(s.ended_at, s.started_at) AS session_ended_at,
 				m.ordinal,
-				POSITION(LOWER($2) IN LOWER(m.content)) AS match_pos,
-				CASE
-					WHEN POSITION(LOWER($2) IN LOWER(m.content)) > 100
-						THEN '...' || SUBSTRING(m.content
-							FROM GREATEST(1, POSITION(
-								LOWER($2) IN LOWER(m.content)
-							) - 50) FOR 200) || '...'
-					ELSE SUBSTRING(m.content FROM 1 FOR 200)
-						|| CASE WHEN LENGTH(m.content) > 200
-							THEN '...' ELSE '' END
-				END AS snippet
+				POSITION(LOWER($2) IN text.folded_content) AS match_pos
 			FROM messages m
 			JOIN sessions s ON m.session_id = s.id
+			CROSS JOIN LATERAL (
+				SELECT `+db.SystemPrefixTrimSQL("m.content")+` AS trimmed_content,
+					LOWER(m.content) AS folded_content
+				OFFSET 0
+			) text
 			WHERE %s
 				AND s.deleted_at IS NULL
 				AND m.is_system = FALSE
-				AND `+db.PostgresSystemPrefixSQL("m.content", "m.role")+`
+				AND `+db.PostgresSystemPrefixSQLFromTrimmed("text.trimmed_content", "m.role")+`
 				%s
-			ORDER BY m.session_id,
-				POSITION(LOWER($2) IN LOWER(m.content)) ASC,
-				m.ordinal ASC
+		),
+		msg_matches AS (
+			SELECT DISTINCT ON (session_id) candidates.*, NULL::text AS snippet
+			FROM candidates
+			ORDER BY session_id, match_pos ASC, ordinal ASC
 		),
 		name_matches AS (
 			SELECT
@@ -467,25 +473,41 @@ func (s *Store) Search(
 				)
 				AND s.id NOT IN (SELECT session_id FROM msg_matches)
 				%s
-		)
+		),
 		-- rank is a constant 1.0 because PostgreSQL ILIKE has no
 	-- relevance scoring engine (unlike SQLite FTS5). Ordering
 	-- uses match_pos and session_ended_at instead.
+	selected_page AS MATERIALIZED (
 	SELECT session_id, project, agent, name,
 			session_ended_at, ordinal,
-			snippet, 1.0 AS rank, match_pos
+			snippet, 1.0 AS rank, match_pos, match_priority
 		FROM (
 			SELECT *, 1 AS match_priority FROM msg_matches
 			UNION ALL
 			SELECT *, 2 AS match_priority FROM name_matches
 		) combined
 		ORDER BY %s
-		LIMIT $%d OFFSET $%d`,
+		LIMIT $%d OFFSET $%d
+	)
+	SELECT page.session_id, page.project, page.agent, page.name,
+		page.session_ended_at, page.ordinal,
+		CASE WHEN page.ordinal < 0 THEN page.snippet
+			WHEN page.match_pos > 100
+				THEN '...' || SUBSTRING(m.content
+					FROM GREATEST(1, page.match_pos - 50) FOR 200) || '...'
+			ELSE SUBSTRING(m.content FROM 1 FOR 200)
+				|| CASE WHEN LENGTH(m.content) > 200 THEN '...' ELSE '' END
+		END AS snippet,
+		page.rank, page.match_pos
+	FROM selected_page page
+	LEFT JOIN messages m ON m.session_id = page.session_id AND m.ordinal = page.ordinal
+	ORDER BY %s`,
 		msgTermPredicate,
 		msgProjectClause,
 		nameProjectClause,
 		outerOrderBy,
 		argIdx, argIdx+1,
+		pageOrderBy,
 	)
 	args = append(args, f.Limit+1, f.Cursor)
 
