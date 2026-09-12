@@ -862,7 +862,7 @@ func TestAntigravityCLIUnrelatedHistorySkipsMappedArchive(t *testing.T) {
 			require.NoError(t, os.MkdirAll(convDir, 0o755))
 			require.NoError(t, os.MkdirAll(cacheDir, 0o755))
 			mapping := map[string]string{}
-			for i := 0; i < count; i++ {
+			for i := range count {
 				id := fmt.Sprintf("33333333-4444-5555-6666-%012d", i)
 				require.NoError(t, os.WriteFile(filepath.Join(convDir, id+".pb"), []byte("legacy source"), 0o644))
 				require.NoError(t, os.WriteFile(filepath.Join(convDir, id+".trajectory.json"), []byte(antigravityCLISingleUserTrajectory(id, "Stored conversation")), 0o644))

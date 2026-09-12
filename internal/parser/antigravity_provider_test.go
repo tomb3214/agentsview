@@ -708,6 +708,11 @@ func TestAntigravityCLIProviderFingerprintTracksSideInputs(t *testing.T) {
 	id := "33333333-4444-5555-6666-777777777777"
 	implicitPath := filepath.Join(root, "implicit", id+".pb")
 	writeAntigravityCLIProviderFixture(t, root, id)
+	cachePath := filepath.Join(root, "cache")
+	mustMkdir(t, cachePath)
+	workspaceMap, err := json.Marshal(map[string]string{t.TempDir(): id})
+	require.NoError(t, err)
+	mustWrite(t, filepath.Join(cachePath, "last_conversations.json"), workspaceMap)
 
 	provider, ok := NewProvider(AgentAntigravityCLI, ProviderConfig{
 		Roots:   []string{root},
