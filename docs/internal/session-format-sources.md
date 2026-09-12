@@ -1651,6 +1651,12 @@ add an archived or maintained mirror without replacing the original identity.
   CWD empty when the value is missing, relative, or ambiguous. The exact
   absolute workspace remains the CWD; the project label is normalized from
   that CWD so project-filtered PostgreSQL mirrors admit the same session.
+  Reverified 2026-09-12: an unrelated untagged history row does not change
+  transcripts or workspace resolution for explicitly mapped conversations.
+  Their fingerprints exclude those rows; unmapped conversations retain
+  history invalidation so the prompt/time fallback can discover changes.
+  SQLite shared-memory reader bookkeeping is not transcript content; source
+  freshness tracks the database and WAL, excluding the shared-memory file.
 
 ## iFlow CLI (`iflow`)
 
