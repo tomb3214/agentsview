@@ -769,7 +769,7 @@ func decryptAntigravityCLITranscript(
 
 // AntigravityCLIFileInfo returns a fake os.FileInfo whose size and
 // mtime combine the session file with everything else the parser
-// renders: SQLite WAL/SHM siblings, the .trajectory.json sidecar,
+// renders: SQLite WAL, the .trajectory.json sidecar,
 // history.jsonl, and the brain/<id> artifacts. History stays here while
 // legacy sync skip checks use this effective file info; provider hashes
 // additionally scope tagged history rows by conversation ID.
@@ -794,9 +794,10 @@ func antigravityCLICompanionPaths(path string) []string {
 		companions := []string{
 			historyPath,
 			path + "-wal",
-			path + "-shm",
 			base + ".trajectory.json",
 		}
+		// SQLite readers update shared-memory bookkeeping without changing
+		// committed content. The database and WAL retain content freshness.
 		return append(companions, antigravityBrainCompanions(
 			filepath.Join(root, "brain", filepath.Base(base)),
 		)...)
@@ -917,6 +918,7 @@ func antigravityCLICompositeHash(path, id, workspace string) (string, error) {
 				h,
 				filepath.Join(filepath.Dir(filepath.Dir(path)), "history.jsonl"),
 				strings.TrimPrefix(id, antigravityImplicitTag),
+				workspace == "",
 			); err != nil {
 				return err
 			}
@@ -952,6 +954,7 @@ func addAntigravityCLIHistoryFingerprintPart(
 	h interface{ Write([]byte) (int, error) },
 	historyPath string,
 	id string,
+	includeUntagged bool,
 ) error {
 	f, err := os.Open(historyPath)
 	if err != nil {
@@ -975,6 +978,11 @@ func addAntigravityCLIHistoryFingerprintPart(
 		}
 		label := "history"
 		if cid == "" {
+			if !includeUntagged {
+				// An explicit workspace bypasses the parser's history
+				// fallback; unrelated prompts cannot affect this session.
+				continue
+			}
 			// Untagged rows are used by the project fallback matcher, whose
 			// source cannot be known from the row alone.
 			label = "history-untagged"

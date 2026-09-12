@@ -12863,6 +12863,11 @@ func (e *Engine) providerSourceUnchangedInDB(
 	if !ok {
 		return false
 	}
+	if agent == parser.AgentAntigravityCLI && storedMtime == 0 {
+		// An explicit archive mtime reset requests a reparse even when
+		// the content hash still matches (including degraded-source repair).
+		return false
+	}
 	if storedSize != fingerprint.Size || storedMtime != fingerprint.MTimeNS {
 		if !e.providerSourceHashFreshDespiteStat(
 			source.Provider, lookupPath, fingerprint,
@@ -12958,10 +12963,12 @@ func (e *Engine) providerFingerprintHashMatchesDB(
 // invalidates every member's stat identity; the per-member hash covers the
 // member's full parse input (session row, messages, selected transcript), so
 // a matching stored hash bounds re-parse and rewrite work to the changed
-// members instead of the whole archive. Providers whose fingerprint stat is
+// members instead of the whole archive. Antigravity CLI similarly includes
+// shared history in its stat, while its hash scopes history to actual inputs.
+// Providers whose fingerprint stat is
 // per-source stay stat-gated: a stat mismatch there means real change.
 func providerFingerprintHashEstablishesFreshness(agent parser.AgentType) bool {
-	return agent == parser.AgentHermes
+	return agent == parser.AgentHermes || agent == parser.AgentAntigravityCLI
 }
 
 // providerSourceHashFreshDespiteStat is the stat-mismatch arm of

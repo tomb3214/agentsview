@@ -708,6 +708,11 @@ func TestAntigravityCLIProviderFingerprintTracksSideInputs(t *testing.T) {
 	id := "33333333-4444-5555-6666-777777777777"
 	implicitPath := filepath.Join(root, "implicit", id+".pb")
 	writeAntigravityCLIProviderFixture(t, root, id)
+	cachePath := filepath.Join(root, "cache")
+	mustMkdir(t, cachePath)
+	workspaceMap, err := json.Marshal(map[string]string{t.TempDir(): id})
+	require.NoError(t, err)
+	mustWrite(t, filepath.Join(cachePath, "last_conversations.json"), workspaceMap)
 
 	provider, ok := NewProvider(AgentAntigravityCLI, ProviderConfig{
 		Roots:   []string{root},
@@ -744,7 +749,8 @@ func TestAntigravityCLIProviderFingerprintTracksSideInputs(t *testing.T) {
 			`"workspace":"/tmp/fallback"}`))
 	afterUntaggedHistory, err := provider.Fingerprint(context.Background(), source)
 	require.NoError(t, err)
-	assert.NotEqual(t, afterUnrelatedHistory.Hash, afterUntaggedHistory.Hash)
+	assert.Equal(t, afterUnrelatedHistory.Hash, afterUntaggedHistory.Hash,
+		"an explicit workspace makes untagged history irrelevant")
 
 	mustWrite(t, filepath.Join(root, "brain", id, "task.md"), []byte("# Changed"))
 	afterBrain, err := provider.Fingerprint(context.Background(), source)
@@ -770,6 +776,48 @@ func TestAntigravityCLIProviderFingerprintTracksSideInputs(t *testing.T) {
 	afterImplicit, err := provider.Fingerprint(context.Background(), implicitSource)
 	require.NoError(t, err)
 	assert.NotEqual(t, beforeImplicit.Hash, afterImplicit.Hash)
+}
+
+func TestAntigravityCLIUnmappedHistoryStillInvalidates(t *testing.T) {
+	root := t.TempDir()
+	id := "33333333-4444-5555-6666-777777777777"
+	writeAntigravityCLIProviderFixture(t, root, id)
+	history := filepath.Join(root, "history.jsonl")
+	mustWrite(t, history, nil)
+	provider, ok := NewProvider(AgentAntigravityCLI, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	source, ok, err := provider.FindSource(context.Background(), FindSourceRequest{RawSessionID: id})
+	require.NoError(t, err)
+	require.True(t, ok)
+	before, err := provider.Fingerprint(context.Background(), source)
+	require.NoError(t, err)
+	mustWrite(t, history, []byte(`{"display":"fallback prompt","timestamp":1779000000000,"workspace":"/tmp/fallback"}`))
+	after, err := provider.Fingerprint(context.Background(), source)
+	require.NoError(t, err)
+	assert.NotEqual(t, before.Hash, after.Hash,
+		"unmapped sessions must still reconsider their prompt/time fallback")
+}
+
+func TestAntigravityCLIFingerprintIgnoresReaderSharedMemory(t *testing.T) {
+	root := t.TempDir()
+	id := "33333333-4444-5555-6666-777777777777"
+	writeAntigravityCLIProviderFixture(t, root, id)
+	provider, ok := NewProvider(AgentAntigravityCLI, ProviderConfig{Roots: []string{root}})
+	require.True(t, ok)
+	source, ok, err := provider.FindSource(context.Background(), FindSourceRequest{RawSessionID: id})
+	require.NoError(t, err)
+	require.True(t, ok)
+	before, err := provider.Fingerprint(context.Background(), source)
+	require.NoError(t, err)
+	dbPath := filepath.Join(root, "conversations", id+".db")
+	mustWrite(t, dbPath+"-shm", []byte("reader bookkeeping"))
+	afterReader, err := provider.Fingerprint(context.Background(), source)
+	require.NoError(t, err)
+	assert.Equal(t, before, afterReader)
+	mustWrite(t, dbPath+"-wal", []byte("changed database content"))
+	afterWrite, err := provider.Fingerprint(context.Background(), source)
+	require.NoError(t, err)
+	assert.NotEqual(t, afterReader.Hash, afterWrite.Hash)
 }
 
 func writeAntigravityIDEProviderFixture(t *testing.T, root, id string) {

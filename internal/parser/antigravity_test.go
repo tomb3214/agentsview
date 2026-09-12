@@ -576,7 +576,7 @@ func createAntigravityOvershortPromptDB(t *testing.T, path string) {
 		0, 14, userPayload)
 }
 
-func TestAntigravityCLIDBFileInfoIncludesSQLiteSidecars(t *testing.T) {
+func TestAntigravityCLIDBFileInfoTracksWALNotSharedMemory(t *testing.T) {
 	root := t.TempDir()
 	id := "44444444-5555-6666-7777-888888888888"
 
@@ -590,11 +590,11 @@ func TestAntigravityCLIDBFileInfoIncludesSQLiteSidecars(t *testing.T) {
 	late := time.Unix(1779000300, 0)
 	require.NoError(t, os.Chtimes(dbPath, early, early))
 	require.NoError(t, os.Chtimes(dbPath+"-wal", late, late))
-	require.NoError(t, os.Chtimes(dbPath+"-shm", early, early))
+	require.NoError(t, os.Chtimes(dbPath+"-shm", late.Add(time.Second), late.Add(time.Second)))
 
 	info, err := AntigravityCLIFileInfo(dbPath)
 	require.NoError(t, err)
-	assert.Equal(t, int64(len("dbwalshm")), info.Size())
+	assert.Equal(t, int64(len("dbwal")), info.Size())
 	assert.Equal(t, late.UnixNano(), info.ModTime().UnixNano())
 }
 

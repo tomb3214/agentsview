@@ -852,3 +852,29 @@ func antigravityCLIStringPayload(s string) []byte {
 	content := []byte(s)
 	return append([]byte{0x8a, 0x01, byte(len(content))}, content...)
 }
+
+func TestAntigravityCLIUnrelatedHistorySkipsMappedArchive(t *testing.T) {
+	for _, count := range []int{1, 8} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			env := setupSingleAgentTestEnv(t, parser.AgentAntigravityCLI)
+			convDir := filepath.Join(env.antigravityCLIDir, "conversations")
+			cacheDir := filepath.Join(env.antigravityCLIDir, "cache")
+			require.NoError(t, os.MkdirAll(convDir, 0o755))
+			require.NoError(t, os.MkdirAll(cacheDir, 0o755))
+			mapping := map[string]string{}
+			for i := range count {
+				id := fmt.Sprintf("33333333-4444-5555-6666-%012d", i)
+				require.NoError(t, os.WriteFile(filepath.Join(convDir, id+".pb"), []byte("legacy source"), 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(convDir, id+".trajectory.json"), []byte(antigravityCLISingleUserTrajectory(id, "Stored conversation")), 0o644))
+				mapping[filepath.Join(t.TempDir(), "project")] = id
+			}
+			data, err := json.Marshal(mapping)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "last_conversations.json"), data, 0o644))
+			runSyncAndAssert(t, env.engine, sync.SyncStats{TotalSessions: count, Synced: count})
+			history := filepath.Join(env.antigravityCLIDir, "history.jsonl")
+			require.NoError(t, os.WriteFile(history, []byte(`{"display":"unrelated review","workspace":"/example/other","timestamp":1779000000000}`), 0o644))
+			runSyncAndAssert(t, env.engine, sync.SyncStats{TotalSessions: count, Skipped: count})
+		})
+	}
+}
