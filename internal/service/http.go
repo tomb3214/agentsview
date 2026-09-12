@@ -534,6 +534,9 @@ func (b *httpBackend) SearchContent(
 ) (*ContentSearchResult, error) {
 	q := url.Values{}
 	q.Set("pattern", req.Pattern)
+	if req.Candidates {
+		q.Set("candidates", "true")
+	}
 	if req.Mode != "" {
 		q.Set("mode", req.Mode)
 	}

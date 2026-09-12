@@ -793,6 +793,9 @@ const maxContentSearchContext = 10
 func (b *directBackend) SearchContent(
 	ctx context.Context, req ContentSearchRequest,
 ) (*ContentSearchResult, error) {
+	if req.Candidates && (req.Mode != "hybrid" || req.Context != 0 || req.Cursor != 0 || req.Reveal) {
+		return nil, &db.SearchInputError{Msg: "candidates requires hybrid mode without context, cursor or reveal"}
+	}
 	if req.Mode == "fts" {
 		for _, s := range req.Sources {
 			if s != "messages" {
@@ -817,6 +820,7 @@ func (b *directBackend) SearchContent(
 	}
 	req.Timezone = timezone
 	page, err := b.db.SearchContent(ctx, db.ContentSearchFilter{
+		Candidates:       req.Candidates,
 		Pattern:          req.Pattern,
 		Mode:             req.Mode,
 		Sources:          req.Sources,
@@ -853,6 +857,7 @@ func (b *directBackend) SearchContent(
 		}
 	}
 	return &ContentSearchResult{
+		Rankings: page.Rankings, Generation: page.Generation, LexicalMethod: page.LexicalMethod,
 		Matches:    page.Matches,
 		NextCursor: page.NextCursor,
 	}, nil

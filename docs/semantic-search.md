@@ -886,3 +886,29 @@ hash, not the version, decides whether a reinstall is a no-op.
 install state — `missing`, `current`, `stale` (unmodified but older than the
 current render), `modified`, or `foreign` (no header) — without writing
 anything.
+
+## Independent candidate rankings
+
+A PostgreSQL read service with a separately commissioned `pg_search` BM25
+index on `vector_documents(doc_key, content)` can accept
+`GET /api/v1/search/content?mode=hybrid&candidates=true&pattern=...`.
+The existing authentication and semantic search-intent header are required.
+Machine, project, agent, date and subordinate-scope filters apply before
+selection. The response contains two independent `rankings` arrays (BM25,
+vector), each bounded to 100 passages, plus `generation` and
+`lexical_method`. It performs no fusion or reranking; a caller combining
+several sources should do those once across the global candidates.
+
+Passages retain document keys, content hashes, chunk indexes, session IDs and
+ordinal ranges. BM25 selects a matching original embedding window using the
+native match position; vector results retain the matching chunk. Both use the
+existing rune-based embedding recipe, and scan complete source text for
+secrets before masking each window. Ordinary short search snippets are not
+used as reranker input. Candidate requests have a 30-second total timeout and
+require a bounded recipe of 1–8192 runes per chunk. Context expansion, cursors
+and secret reveal are rejected for this route.
+
+This capability does not install extensions, migrate data, rebuild embeddings,
+or change ordinary search modes. Uncommissioned PostgreSQL stores and other
+backends do not silently substitute another lexical ranking. Native extension
+installation and index creation require their normal deployment process.
