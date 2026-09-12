@@ -74,6 +74,7 @@ export type { DbRecentEditFile } from './models/DbRecentEditFile';
 export type { DbRecentEditsResult } from './models/DbRecentEditsResult';
 export type { DbScopedDistribution } from './models/DbScopedDistribution';
 export type { DbScopedDistributionPair } from './models/DbScopedDistributionPair';
+export type { DbSearchCandidate } from './models/DbSearchCandidate';
 export type { DbSearchResult } from './models/DbSearchResult';
 export type { DbSecretFindingRow } from './models/DbSecretFindingRow';
 export type { DbSession } from './models/DbSession';
