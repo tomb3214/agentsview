@@ -28,6 +28,7 @@ const (
 // include-children / one-shot / orphan logic is shared, not reimplemented.
 type ContentSearchFilter struct {
 	Pattern       string
+	Candidates    bool     // Return independent full-passage rankings on commissioned PostgreSQL stores.
 	Mode          string   // "substring" (default) | "regex" | "fts" | "semantic" | "hybrid"
 	Sources       []string // subset of {"messages","tool_input","tool_result"}
 	ExcludeSystem bool
@@ -96,10 +97,26 @@ type ContentMatch struct {
 	ContextAfter  []Message `json:"context_after,omitempty"`
 }
 
-// ContentSearchPage is a page of matches with an optional next cursor.
+// SearchCandidate is a source-identifiable passage for downstream shared ranking.
+type SearchCandidate struct {
+	SessionID    string `json:"session_id"`
+	Machine      string `json:"machine"`
+	Project      string `json:"project"`
+	Agent        string `json:"agent"`
+	DocKey       string `json:"doc_key"`
+	ContentHash  string `json:"content_hash"`
+	ChunkIndex   int    `json:"chunk_index"`
+	OrdinalRange [2]int `json:"ordinal_range"`
+	Text         string `json:"text"`
+}
+
+// ContentSearchPage contains ordinary matches or independent candidate rankings.
 type ContentSearchPage struct {
-	Matches    []ContentMatch `json:"matches"`
-	NextCursor int            `json:"next_cursor,omitempty"`
+	Rankings      [][]SearchCandidate `json:"rankings,omitempty"`
+	Generation    int64               `json:"generation,omitempty"`
+	LexicalMethod string              `json:"lexical_method,omitempty"`
+	Matches       []ContentMatch      `json:"matches"`
+	NextCursor    int                 `json:"next_cursor,omitempty"`
 }
 
 // SearchInputError marks a content-search failure caused by invalid user
@@ -168,6 +185,9 @@ func semanticSessionScopeSubquery(f ContentSearchFilter) (string, []any) {
 func (db *DB) SearchContent(
 	ctx context.Context, f ContentSearchFilter,
 ) (ContentSearchPage, error) {
+	if f.Candidates {
+		return ContentSearchPage{}, fmt.Errorf("%w: independent candidates require the commissioned PostgreSQL store", ErrSemanticUnavailable)
+	}
 	if f.Limit <= 0 || f.Limit > MaxContentSearchLimit {
 		f.Limit = DefaultContentSearchLimit
 	}

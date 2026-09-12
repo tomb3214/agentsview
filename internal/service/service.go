@@ -175,6 +175,7 @@ type SessionSearchResult struct {
 
 // ContentSearchRequest is the transport-neutral content-search input.
 type ContentSearchRequest struct {
+	Candidates    bool     `json:"candidates,omitempty"`
 	Pattern       string   `json:"pattern"`
 	Mode          string   `json:"mode,omitempty"` // substring|regex|fts|semantic|hybrid
 	Sources       []string `json:"sources,omitempty"`
@@ -201,8 +202,11 @@ type ContentSearchRequest struct {
 
 // ContentSearchResult mirrors db.ContentSearchPage for transport.
 type ContentSearchResult struct {
-	Matches    []db.ContentMatch `json:"matches"`
-	NextCursor int               `json:"next_cursor,omitempty"`
+	Rankings      [][]db.SearchCandidate `json:"rankings,omitempty"`
+	Generation    int64                  `json:"generation,omitempty"`
+	LexicalMethod string                 `json:"lexical_method,omitempty"`
+	Matches       []db.ContentMatch      `json:"matches"`
+	NextCursor    int                    `json:"next_cursor,omitempty"`
 }
 
 // RecallFilter mirrors GET /api/v1/recall/entries query parameters.

@@ -32,6 +32,7 @@ type searchInput struct {
 }
 
 type contentSearchInput struct {
+	Candidates       bool               `query:"candidates" doc:"Return independent full-passage rankings from a commissioned PostgreSQL store"`
 	Pattern          string             `query:"pattern" required:"true" doc:"Pattern to search for"`
 	Mode             contentSearchMode  `query:"mode" enum:"substring,regex,fts,semantic,hybrid" doc:"Search mode"`
 	Scope            contentSearchScope `query:"scope" enum:"top,all,subordinate" doc:"Semantic/hybrid result scope: top, all, or subordinate (default all)"`
@@ -119,6 +120,7 @@ func (s *Server) humaSearchContent(
 		return nil, apiError(http.StatusBadRequest, err.Error())
 	}
 	res, err := s.sessions.SearchContent(ctx, service.ContentSearchRequest{
+		Candidates:       in.Candidates,
 		Pattern:          in.Pattern,
 		Mode:             string(in.Mode),
 		Sources:          sources,

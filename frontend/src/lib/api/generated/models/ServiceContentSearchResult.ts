@@ -3,7 +3,10 @@
 /* tslint:disable */
 /* eslint-disable */
 export type ServiceContentSearchResult = {
+  generation?: number;
+  lexical_method?: string;
   matches: any[] | null;
   next_cursor?: number;
+  rankings?: any[] | null;
 };
 

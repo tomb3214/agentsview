@@ -73,6 +73,7 @@ export class SearchService {
    */
   public static getApiV1SearchContent({
     pattern,
+    candidates,
     mode,
     scope,
     xAgentsViewSearchIntent,
@@ -100,6 +101,10 @@ export class SearchService {
      * Pattern to search for
      */
     pattern: string,
+    /**
+     * Return independent full-passage rankings from a commissioned PostgreSQL store
+     */
+    candidates?: boolean,
     /**
      * Search mode
      */
@@ -196,6 +201,7 @@ export class SearchService {
         'X-AgentsView-Search-Intent': xAgentsViewSearchIntent,
       },
       query: {
+        'candidates': candidates,
         'pattern': pattern,
         'mode': mode,
         'scope': scope,

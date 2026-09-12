@@ -24,6 +24,15 @@ const (
 func (s *Store) SearchContent(
 	ctx context.Context, f db.ContentSearchFilter,
 ) (db.ContentSearchPage, error) {
+	if f.Candidates {
+		if f.Mode != "hybrid" || f.Cursor != 0 || f.RevealSecrets {
+			return db.ContentSearchPage{}, &db.SearchInputError{Msg: "candidates requires hybrid mode without cursor or reveal"}
+		}
+		if err := db.ValidateSemanticFilter(f); err != nil {
+			return db.ContentSearchPage{}, err
+		}
+		return s.searchCandidatesPG(ctx, f)
+	}
 	if f.Limit <= 0 || f.Limit > db.MaxContentSearchLimit {
 		f.Limit = db.DefaultContentSearchLimit
 	}
