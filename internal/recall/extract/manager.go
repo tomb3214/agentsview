@@ -323,9 +323,7 @@ func (m *Manager) extractSessions(ctx context.Context, ids []string, staged, exp
 	var result PassResult
 	var firstErr error
 	for range min(m.cfg.Concurrency, len(ids)) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for id := range jobs {
 				if workCtx.Err() != nil {
 					return
@@ -353,7 +351,7 @@ func (m *Manager) extractSessions(ctx context.Context, ids []string, staged, exp
 					return
 				}
 			}
-		}()
+		})
 	}
 admit:
 	for _, id := range ids {
