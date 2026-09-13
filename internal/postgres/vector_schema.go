@@ -47,6 +47,16 @@ CREATE TABLE IF NOT EXISTS vector_push_state (
     source_revision TEXT,
     PRIMARY KEY (generation_id, session_id)
 );
+CREATE TABLE IF NOT EXISTS vector_build_chunks (
+    generation_id  BIGINT NOT NULL REFERENCES vector_generations(id) ON DELETE CASCADE,
+    session_id     TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    source_revision TEXT NOT NULL,
+    doc_agg_hash   TEXT NOT NULL,
+    doc_key        TEXT NOT NULL,
+    chunk_index    INTEGER NOT NULL,
+    embedding      TEXT NOT NULL,
+    PRIMARY KEY (generation_id, session_id, doc_key, chunk_index)
+);
 `
 
 // VectorExtensionAvailable reports whether the pgvector extension is
@@ -139,7 +149,7 @@ func ensureVectorBaseSchemaPG(ctx context.Context, pg *sql.DB) (string, error) {
 	if _, err := pg.ExecContext(ctx, vectorBaseDDL); err != nil {
 		return "", fmt.Errorf("creating vector base schema: %w", err)
 	}
-	return "", nil
+	return "", ensureVectorSourceRevision(ctx, pg)
 }
 
 // ensureVectorSourceRevision is the additive central-producer migration. A
@@ -169,6 +179,7 @@ func vectorBaseSchemaReady(ctx context.Context, pg *sql.DB) bool {
 		"vector_generation_machines",
 		"vector_documents",
 		"vector_push_state",
+		"vector_build_chunks",
 	} {
 		if !pgHasTable(ctx, pg, table) {
 			return false

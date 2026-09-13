@@ -236,15 +236,18 @@ func TestCentralVectorBuildBatchesAcrossDocuments(t *testing.T) {
 	assert.Zero(t, failed.Published)
 	assert.Zero(t, countRows(t, pg, `SELECT COUNT(*) FROM vector_documents WHERE session_id='batch'`))
 	assert.Zero(t, countRows(t, pg, `SELECT COUNT(*) FROM vector_push_state WHERE session_id='batch'`))
+	assert.Equal(t, 4, countRows(t, pg, `SELECT COUNT(*) FROM vector_build_chunks WHERE session_id='batch'`))
 	failSecondBatch = false
-	encoded = 0
 	batches = nil
 	result, err := BuildCentralVectors(ctx, pg, o)
 	require.NoError(t, err)
-	assert.Equal(t, []int{4, 1}, batches)
-	assert.Equal(t, 2, result.Requests)
-	assert.Equal(t, 5, result.Chunks)
+	assert.Equal(t, []int{1}, batches)
+	assert.Equal(t, 1, result.Requests)
+	assert.Equal(t, 1, result.Chunks)
+	assert.Equal(t, 4, result.CachedChunks)
+	assert.Equal(t, 1, result.StagedChunks)
 	assert.Equal(t, 1, result.Published)
+	assert.Zero(t, countRows(t, pg, `SELECT COUNT(*) FROM vector_build_chunks WHERE session_id='batch'`))
 	for i, doc := range docs {
 		var actual string
 		require.NoError(t, pg.QueryRow(`SELECT embedding::text FROM `+vectorChunkTable(id)+` WHERE doc_key=$1 AND chunk_index=0`, doc.DocKey).Scan(&actual))
@@ -255,19 +258,79 @@ func TestCentralVectorBuildBatchesAcrossDocuments(t *testing.T) {
 	noop, err := BuildCentralVectors(ctx, pg, o)
 	require.NoError(t, err)
 	assert.Zero(t, noop.Examined)
-	assert.Equal(t, []int{4, 1}, batches)
+	assert.Equal(t, []int{1}, batches)
 }
 
 func TestCentralVectorCheckpointMigrationPreservesState(t *testing.T) {
 	ctx := context.Background()
 	_, _, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_central_migrate_test")
-	_, err := pg.Exec(`ALTER TABLE vector_push_state DROP COLUMN source_revision; INSERT INTO vector_push_state(generation_id,session_id,doc_agg_hash) VALUES(91,'retained','hash')`)
+	_, err := pg.Exec(`DROP TABLE vector_build_chunks; ALTER TABLE vector_push_state DROP COLUMN source_revision; INSERT INTO vector_push_state(generation_id,session_id,doc_agg_hash) VALUES(91,'retained','hash')`)
 	require.NoError(t, err)
-	require.NoError(t, ensureVectorSourceRevision(ctx, pg))
+	reason, err := ensureVectorBaseSchemaPG(ctx, pg)
+	require.NoError(t, err)
+	assert.Empty(t, reason)
+	assert.True(t, vectorBaseSchemaReady(ctx, pg))
 	require.NoError(t, ensureVectorSourceRevision(ctx, pg))
 	var hash string
 	require.NoError(t, pg.QueryRow(`SELECT doc_agg_hash FROM vector_push_state WHERE generation_id=91 AND session_id='retained'`).Scan(&hash))
 	assert.Equal(t, "hash", hash)
+}
+
+func TestCentralVectorBatchBudgetResumesOnlyCurrentRevision(t *testing.T) {
+	for _, drift := range []bool{false, true} {
+		name := "resume"
+		if drift {
+			name = "changed_source"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			syncer, local, pg := newVectorPushTestSync(t, testPGURL(t), "agentsview_central_staging_test")
+			seedVectorSession(t, local, "large")
+			_, err := syncer.Push(ctx, false, nil)
+			require.NoError(t, err)
+			_, err = pg.Exec(`UPDATE messages SET content=repeat('x',20000) WHERE session_id='large'`)
+			require.NoError(t, err)
+			gen := kitvec.Generation{Model: "staging-model", Dimensions: 4, Params: map[string]string{"max_input_chars": "8192", "doc_unit_scheme": "run_v1", "chunk_overlap_chars": "1228"}}
+			id, err := ensureVectorGeneration(ctx, pg, gen.Fingerprint(), gen.Model, 4)
+			require.NoError(t, err)
+			require.NoError(t, ensureVectorChunkTable(ctx, pg, id, 4))
+			o := VectorBuildOptions{Machine: "test-machine", Generation: gen, MaxSources: 1, MaxChunks: 1, BatchSize: 1, MaxInputChars: 8192, MaxSourceBytes: 1 << 20, Timeout: time.Minute, Encode: func(_ context.Context, texts []string) ([][]float32, error) {
+				return [][]float32{{1, float32(texts[0][0]), 0, 0}}, nil
+			}}
+			first, err := BuildCentralVectors(ctx, pg, o)
+			require.NoError(t, err)
+			assert.True(t, first.BoundReached)
+			assert.Equal(t, 1, first.StagedChunks)
+			assert.Zero(t, first.Published)
+			assert.Zero(t, countRows(t, pg, `SELECT count(*) FROM vector_documents`))
+			assert.Zero(t, countRows(t, pg, `SELECT count(*) FROM vector_push_state`))
+			if drift {
+				_, err = pg.Exec(`UPDATE messages SET content=repeat('y',20000) WHERE session_id='large'; UPDATE sessions SET transcript_revision='2',updated_at=now() WHERE id='large'`)
+				require.NoError(t, err)
+			}
+			o.MaxChunks = 10
+			resumed, err := BuildCentralVectors(ctx, pg, o)
+			require.NoError(t, err)
+			assert.Equal(t, 1, resumed.Published)
+			if drift {
+				assert.Zero(t, resumed.CachedChunks)
+				assert.Equal(t, 3, resumed.StagedChunks)
+			} else {
+				assert.Equal(t, 1, resumed.CachedChunks)
+				assert.Equal(t, 2, resumed.StagedChunks)
+			}
+			assert.Zero(t, countRows(t, pg, `SELECT count(*) FROM vector_build_chunks`))
+			var actual string
+			require.NoError(t, pg.QueryRow(`SELECT embedding::text FROM `+vectorChunkTable(id)+` WHERE chunk_index=0`).Scan(&actual))
+			letter := byte('x')
+			if drift {
+				letter = 'y'
+			}
+			expected, err := halfvecLiteral([]float32{1, float32(letter), 0, 0})
+			require.NoError(t, err)
+			assert.Equal(t, expected, actual)
+		})
+	}
 }
 
 func TestCentralVectorSourceRLSRemainsAuthoritative(t *testing.T) {
@@ -292,11 +355,11 @@ func TestCentralVectorSourceRLSRemainsAuthoritative(t *testing.T) {
 	require.NoError(t, err)
 	_, err = pg.Exec(`GRANT USAGE ON SCHEMA ` + extSchema + ` TO ` + role)
 	require.NoError(t, err)
-	_, err = pg.Exec(`GRANT USAGE ON SCHEMA ` + schema + ` TO ` + role + `; GRANT SELECT ON ALL TABLES IN SCHEMA ` + schema + ` TO ` + role + `; GRANT UPDATE ON sessions TO ` + role + `; GRANT INSERT,UPDATE,DELETE ON vector_documents,vector_push_state,vector_generation_machines,` + vectorChunkTable(id) + ` TO ` + role)
+	_, err = pg.Exec(`GRANT USAGE ON SCHEMA ` + schema + ` TO ` + role + `; GRANT SELECT ON ALL TABLES IN SCHEMA ` + schema + ` TO ` + role + `; GRANT UPDATE ON sessions TO ` + role + `; GRANT INSERT,UPDATE,DELETE ON vector_documents,vector_push_state,vector_build_chunks,vector_generation_machines,` + vectorChunkTable(id) + ` TO ` + role)
 	require.NoError(t, err)
-	for _, table := range []string{"sessions", "messages", "vector_documents", "vector_push_state", "vector_generation_machines", vectorChunkTable(id)} {
+	for _, table := range []string{"sessions", "messages", "vector_documents", "vector_push_state", "vector_build_chunks", "vector_generation_machines", vectorChunkTable(id)} {
 		predicate := "machine='test-machine'"
-		if table == "messages" || table == "vector_documents" || table == "vector_push_state" {
+		if table == "messages" || table == "vector_documents" || table == "vector_push_state" || table == "vector_build_chunks" {
 			predicate = "session_id IN (SELECT id FROM sessions WHERE machine='test-machine')"
 		}
 		if table == vectorChunkTable(id) {
