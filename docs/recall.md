@@ -181,13 +181,20 @@ api_key_env = "ATLASCLOUD_API_KEY"
 timeout = "120s"
 ```
 
-Optional keys: `deployment` (labels which serving instance produced the corpus),
+Optional keys: `concurrency` (independent sessions processed at once; omitted or
+zero means one), `deployment` (labels which serving instance produced the corpus),
 `server` (selects among multiple named servers), `quiet_period` (default `"30m"`
 — how long a session must have been ended before extraction),
 `backstop_interval` (default `"1h"`), `failure_backoff` (default `"1h"`),
 `max_window_chars` (default 50000), `max_tokens`, per-server `api_key_env`, a
 `[recall.extract.prompts]` table (`profile`, `dir`), and a
 `[recall.extract.request]` table (`temperature`, `extra_body`).
+
+Concurrency is a scheduling setting, so changing it preserves the extraction
+generation. Units within a session remain sequential and checkpointed. Match
+concurrency to the shared endpoint capacity across clients; a larger value does
+not increase the provider quota. A pass joins its workers before activation or
+restart, and committed units are reused on recovery.
 
 Non-loopback endpoints must use HTTPS: extraction sends transcript content to
 the endpoint, and plaintext HTTP off the machine could be intercepted. A server

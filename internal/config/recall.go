@@ -28,8 +28,11 @@ type RecallConfig struct {
 // transport only and deliberately outside that identity — moving the same
 // deployment to a new address must not orphan the corpus.
 type RecallExtractConfig struct {
-	Enabled bool   `toml:"enabled" json:"enabled"`
-	Model   string `toml:"model" json:"model"`
+	// Concurrency overlaps independent sessions; zero preserves serial processing.
+	// This is scheduling only and does not change the extraction fingerprint.
+	Concurrency int    `toml:"concurrency" json:"concurrency"`
+	Enabled     bool   `toml:"enabled" json:"enabled"`
+	Model       string `toml:"model" json:"model"`
 	// Deployment labels which serving instance of Model produced the
 	// corpus, for setups where two deployments serve different weights
 	// under one model name. Optional.
@@ -133,6 +136,9 @@ func (c RecallExtractConfig) ResolvedServer() (string, RecallExtractServerConfig
 func (c RecallExtractConfig) Validate() error {
 	if !c.Enabled {
 		return nil
+	}
+	if c.Concurrency < 0 {
+		return fmt.Errorf("[recall.extract] concurrency must not be negative")
 	}
 	if strings.TrimSpace(c.Model) == "" {
 		return fmt.Errorf(
