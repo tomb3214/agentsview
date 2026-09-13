@@ -380,11 +380,12 @@ func TestRecallExtractConfigTOMLLoad(t *testing.T) {
 	cfg := loadMinimalWithConfig(t, map[string]any{
 		"recall": map[string]any{
 			"extract": map[string]any{
-				"enabled":    true,
-				"model":      "qwen3.5-27b",
-				"deployment": "gpu-a",
-				"server":     "local",
-				"max_tokens": 8192,
+				"enabled":     true,
+				"concurrency": 8,
+				"model":       "qwen3.5-27b",
+				"deployment":  "gpu-a",
+				"server":      "local",
+				"max_tokens":  8192,
 				"servers": map[string]any{
 					"local": map[string]any{
 						"endpoint": "http://127.0.0.1:30000/v1",
@@ -413,6 +414,7 @@ func TestRecallExtractConfigTOMLLoad(t *testing.T) {
 
 	extract := cfg.Recall.Extract
 	require.True(t, extract.Enabled)
+	assert.Equal(t, 8, extract.Concurrency, "configured workers survive file loading")
 	assert.Equal(t, "qwen3.5-27b", extract.Model)
 	assert.Equal(t, "gpu-a", extract.Deployment)
 	assert.Equal(t, "local", extract.Server)
