@@ -43,9 +43,9 @@ func newPGVectorsBuildCommand() *cobra.Command {
 	cmd.Flags().StringVar(&machine, "machine", "", "Original source machine to reconcile (required)")
 	cmd.Flags().IntVar(&sources, "max-sources", 25, "Maximum source sessions examined")
 	cmd.Flags().IntVar(&sourceBytes, "max-source-bytes", 16<<20, "Maximum source transcript bytes held in memory")
-	cmd.Flags().IntVar(&chunks, "max-chunks", 256, "Chunk budget between complete sources; one source may exceed it")
-	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "Normal pass budget; finish the current source before yielding")
-	cmd.Flags().DurationVar(&hardTimeout, "hard-timeout", 30*time.Minute, "Hard deadline including source completion")
+	cmd.Flags().IntVar(&chunks, "max-chunks", 256, "New chunk budget; finish the current batch before yielding")
+	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Minute, "Normal pass budget; checkpoint the current batch before yielding")
+	cmd.Flags().DurationVar(&hardTimeout, "hard-timeout", 30*time.Minute, "Hard deadline including the current batch")
 	_ = cmd.MarkFlagRequired("machine")
 	return cmd
 }

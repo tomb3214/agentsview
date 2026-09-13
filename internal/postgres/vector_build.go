@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"strconv"
 	"time"
 
@@ -31,6 +30,7 @@ type VectorBuildOptions struct {
 
 type VectorBuildResult struct {
 	Examined, Published, Reused, Deferred, Chunks, Requests int
+	StagedChunks, CachedChunks                              int
 	BoundReached                                            bool
 }
 
@@ -41,7 +41,7 @@ const vectorSourceRevision = `jsonb_build_array(s.transcript_revision,s.updated_
 
 // BuildCentralVectors completes a bounded current-source pass. The connection
 // advisory lock disappears when a worker dies; it is not a durable queue lease.
-// Installed source_revision checkpoints and generation hashes survive restarts.
+// Completed batches survive restarts; only complete sources become searchable.
 func BuildCentralVectors(ctx context.Context, pg *sql.DB, o VectorBuildOptions) (r VectorBuildResult, err error) {
 	if o.Machine == "" || o.MaxSources < 1 || o.MaxChunks < 1 || o.BatchSize < 1 || o.MaxInputChars < 1 || o.MaxSourceBytes < 1 || o.Timeout <= 0 || o.Encode == nil {
 		return r, errors.New("machine, positive bounds and encoder are required")
@@ -49,7 +49,7 @@ func BuildCentralVectors(ctx context.Context, pg *sql.DB, o VectorBuildOptions) 
 	if o.Generation.Params["max_input_chars"] != strconv.Itoa(o.MaxInputChars) || o.Generation.Params["doc_unit_scheme"] != "run_v1" || o.Generation.Params["chunk_overlap_chars"] != strconv.Itoa(avvec.ChunkOverlap(o.MaxInputChars)) {
 		return r, errors.New("chunk recipe differs from generation")
 	}
-	// The normal budget yields between complete sources. A separate hard
+	// The normal budget yields between persisted batches. A separate hard
 	// deadline and caller cancellation still bound an unresponsive attempt.
 	budgetEnd := time.Now().Add(o.Timeout)
 	hardTimeout := o.HardTimeout
@@ -72,6 +72,11 @@ func BuildCentralVectors(ctx context.Context, pg *sql.DB, o VectorBuildOptions) 
 	rows, err := pg.QueryContext(ctx, `SELECT source_revision FROM vector_push_state LIMIT 0`)
 	if err != nil {
 		return r, fmt.Errorf("central vector checkpoint schema required: %w", err)
+	}
+	rows.Close()
+	rows, err = pg.QueryContext(ctx, `SELECT generation_id,session_id,source_revision,doc_agg_hash,doc_key,chunk_index,embedding FROM vector_build_chunks LIMIT 0`)
+	if err != nil {
+		return r, fmt.Errorf("central vector batch staging schema required: %w", err)
 	}
 	rows.Close()
 	exists, err := VectorChunkTableExists(ctx, pg, id)
@@ -171,61 +176,16 @@ func BuildCentralVectors(ctx context.Context, pg *sql.DB, o VectorBuildOptions) 
 			return r, err
 		}
 		if !reuse && docs != nil {
-			needed := 0
-			for _, d := range docs {
-				needed += len(kitvec.Split(d.Content, kitvec.SplitOptions{MaxRunes: o.MaxInputChars, Overlap: avvec.ChunkOverlap(o.MaxInputChars)}))
+			complete, e := stageCentralVectorChunks(ctx, lease, id, sid, rev, hash, docs, o, budgetEnd, &r)
+			if e != nil {
+				return r, e
 			}
-			// Admit one complete source even when it exceeds the normal chunk
-			// budget; otherwise that source can never acquire a checkpoint.
-			if r.Chunks > 0 && needed > o.MaxChunks-r.Chunks {
-				r.BoundReached = true
-				break
+			if r.BoundReached {
+				return r, nil
 			}
-			// Fill batches across documents while retaining the source as the
-			// atomic publication and revision-check boundary.
-			type inputChunk struct {
-				docIndex, chunkIndex int
-				text                 string
-			}
-			inputs := make([]inputChunk, 0, needed)
-			for i := range docs {
-				parts := kitvec.Split(docs[i].Content, kitvec.SplitOptions{MaxRunes: o.MaxInputChars, Overlap: avvec.ChunkOverlap(o.MaxInputChars)})
-				for _, part := range parts {
-					inputs = append(inputs, inputChunk{i, part.Index, part.Text})
-				}
-			}
-			for start := 0; start < len(inputs); start += o.BatchSize {
-				end := min(start+o.BatchSize, len(inputs))
-				texts := make([]string, end-start)
-				for j, input := range inputs[start:end] {
-					texts[j] = input.text
-				}
-				r.Requests++
-				vectors, e := o.Encode(ctx, texts)
-				if e != nil {
-					return r, e
-				}
-				if len(vectors) != len(texts) {
-					return r, errors.New("encoder returned wrong vector count")
-				}
-				for j, v := range vectors {
-					if len(v) != dim {
-						return r, errors.New("encoder returned wrong vector dimension")
-					}
-					norm := 0.0
-					for _, x := range v {
-						norm += float64(x) * float64(x)
-					}
-					if norm == 0 || math.IsInf(norm, 0) || math.IsNaN(norm) {
-						return r, errors.New("encoder returned invalid vector norm")
-					}
-					if _, e = halfvecLiteral(v); e != nil {
-						return r, e
-					}
-					input := inputs[start+j]
-					docs[input.docIndex].Chunks = append(docs[input.docIndex].Chunks, VectorPushChunk{ChunkIndex: input.chunkIndex, Embedding: v})
-					r.Chunks++
-				}
+			if !complete {
+				r.Deferred++
+				continue
 			}
 		}
 		// Use the lease connection for commit, preventing publication after lock loss.
@@ -403,6 +363,9 @@ func installCentralVectors(ctx context.Context, conn *sql.Conn, gen vectorGenera
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO vector_generation_machines(generation_id,machine) VALUES($1,$2) ON CONFLICT(generation_id,machine) DO UPDATE SET last_push_at=now()`, gen.id, o.Machine)
 	if err != nil {
+		return false, err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM vector_build_chunks WHERE generation_id=$1 AND session_id=$2`, gen.id, sid); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()
