@@ -493,6 +493,7 @@ func TestVectorPushRecreatedTablesReusedIDPromotesScopedPush(t *testing.T) {
 		`DROP TABLE IF EXISTS vector_push_state`,
 		`DROP TABLE IF EXISTS vector_generation_machines`,
 		`DROP TABLE IF EXISTS vector_documents`,
+		`DROP TABLE IF EXISTS vector_build_chunks`,
 		`DROP TABLE IF EXISTS vector_generations`,
 	} {
 		_, err := pg.Exec(q)
@@ -728,6 +729,7 @@ func TestVectorPushRecreatedTablesAfterScopedApplyRetriesGenerationWide(t *testi
 			`DROP TABLE IF EXISTS vector_push_state`,
 			`DROP TABLE IF EXISTS vector_generation_machines`,
 			`DROP TABLE IF EXISTS vector_documents`,
+			`DROP TABLE IF EXISTS vector_build_chunks`,
 			`DROP TABLE IF EXISTS vector_generations`,
 		} {
 			_, err := pg.Exec(q)
@@ -897,6 +899,7 @@ func TestVectorPushFilteredWitnessDoesNotCrossScopesAfterTableRecreation(t *test
 		`DROP TABLE IF EXISTS vector_push_state`,
 		`DROP TABLE IF EXISTS vector_generation_machines`,
 		`DROP TABLE IF EXISTS vector_documents`,
+		`DROP TABLE IF EXISTS vector_build_chunks`,
 		`DROP TABLE IF EXISTS vector_generations`,
 	} {
 		_, err := pg.Exec(q)
@@ -973,6 +976,7 @@ func TestVectorPushFullRechecksGenerationBeforeRecordingWitness(t *testing.T) {
 			`DROP TABLE IF EXISTS vector_push_state`,
 			`DROP TABLE IF EXISTS vector_generation_machines`,
 			`DROP TABLE IF EXISTS vector_documents`,
+			`DROP TABLE IF EXISTS vector_build_chunks`,
 			`DROP TABLE IF EXISTS vector_generations`,
 		} {
 			_, err := pg.Exec(q)
