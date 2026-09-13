@@ -127,6 +127,7 @@ func buildExtractManager(
 		return nil, err
 	}
 	return extract.NewManager(extract.ManagerConfig{
+		Concurrency:    cfg.Concurrency,
 		DB:             database,
 		Client:         dist.Client,
 		Segmenter:      dist.Segmenter,

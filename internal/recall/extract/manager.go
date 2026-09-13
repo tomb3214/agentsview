@@ -37,11 +37,13 @@ var ErrPassRunning = errors.New("recall extraction pass is running")
 // parts (Identity, Segmenter, Prompts, Client.Request) are fingerprinted at
 // construction, so a Manager is bound to exactly one generation.
 type ManagerConfig struct {
-	DB        *db.DB
-	Client    *Client
-	Segmenter TurnsV1
-	Prompts   map[PromptRole]string
-	Identity  ModelIdentity
+	// Concurrency bounds independently checkpointed sessions. Zero defaults to one.
+	Concurrency int
+	DB          *db.DB
+	Client      *Client
+	Segmenter   TurnsV1
+	Prompts     map[PromptRole]string
+	Identity    ModelIdentity
 	// QuietPeriod excludes sessions that ended too recently from scans, so
 	// a session that resumes shortly after ending is not extracted mid-way.
 	QuietPeriod time.Duration
@@ -126,6 +128,12 @@ type Status struct {
 
 // NewManager validates the configuration and computes its fingerprint.
 func NewManager(cfg ManagerConfig) (*Manager, error) {
+	if cfg.Concurrency < 0 {
+		return nil, fmt.Errorf("extraction concurrency must not be negative")
+	}
+	if cfg.Concurrency == 0 {
+		cfg.Concurrency = 1
+	}
 	if cfg.DB == nil {
 		return nil, fmt.Errorf("extraction manager requires a database")
 	}
@@ -258,33 +266,9 @@ func (m *Manager) runPassLocked(
 	// archived so an unfinished corpus never serves; activation promotes
 	// them atomically.
 	staged := generation.State != db.ExtractGenerationActive
-	for _, sessionID := range sessionIDs {
-		if err := ctx.Err(); err != nil {
-			return result, err
-		}
-		outcome, err := m.extractSession(
-			ctx, sessionID, staged, opts.SessionID != "")
-		result.Units += outcome.units
-		result.Entries += outcome.entries
-		if outcome.failed {
-			result.Failed++
-		}
-		if err != nil {
-			// Ineligibility at the first snapshot is drift: selection
-			// only returned eligible sessions, so this one was excluded
-			// concurrently and the reconciliation below (and the next
-			// pass) own it. Aborting would drop the pass's remaining
-			// candidates. An explicit run keeps the error — the caller
-			// named the session and must hear why it was refused.
-			var ineligible *ineligibleSessionError
-			if opts.SessionID == "" && errors.As(err, &ineligible) {
-				continue
-			}
-			return result, err
-		}
-		if outcome.done {
-			result.Sessions++
-		}
+	result, err = m.extractSessions(ctx, sessionIDs, staged, opts.SessionID != "")
+	if err != nil {
+		return result, err
 	}
 	// A second reconciliation after the loop catches eligibility lost
 	// while units were at the model — the mid-extraction discard reopens
@@ -324,6 +308,65 @@ func (m *Manager) runPassLocked(
 		}
 	}
 	return result, nil
+}
+
+// extractSessions keeps a single pass owner while overlapping model waits for
+// different sessions. Each session retains its sequential unit checkpoints.
+// On a pass-level failure, stop admission, cancel siblings, and join every
+// worker before releasing the pass lock or considering generation activation.
+func (m *Manager) extractSessions(ctx context.Context, ids []string, staged, explicit bool) (PassResult, error) {
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan string)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var result PassResult
+	var firstErr error
+	for range min(m.cfg.Concurrency, len(ids)) {
+		wg.Go(func() {
+			for id := range jobs {
+				if workCtx.Err() != nil {
+					return
+				}
+				outcome, err := m.extractSession(workCtx, id, staged, explicit)
+				var ineligible *ineligibleSessionError
+				if !explicit && errors.As(err, &ineligible) {
+					err = nil
+				}
+				mu.Lock()
+				result.Units += outcome.units
+				result.Entries += outcome.entries
+				if outcome.failed {
+					result.Failed++
+				}
+				if outcome.done {
+					result.Sessions++
+				}
+				if err != nil && firstErr == nil {
+					firstErr = err
+					cancel()
+				}
+				mu.Unlock()
+				if err != nil {
+					return
+				}
+			}
+		})
+	}
+admit:
+	for _, id := range ids {
+		select {
+		case <-workCtx.Done():
+			break admit
+		case jobs <- id:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	if firstErr != nil {
+		return result, firstErr
+	}
+	return result, ctx.Err()
 }
 
 func (m *Manager) ensureGeneration(ctx context.Context) error {

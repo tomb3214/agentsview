@@ -2871,3 +2871,82 @@ func TestManagerRunPassRetainsEntriesWhenRevisitFindsCredentialPattern(t *testin
 	assert.Equal(t, db.ExtractProgressDone, progress.State)
 	assert.Empty(t, progress.LastError)
 }
+
+func TestManagerConcurrentSessionsResumeAndNoop(t *testing.T) {
+	for _, interrupt := range []bool{false, true} {
+		t.Run(fmt.Sprintf("interrupt=%v", interrupt), func(t *testing.T) {
+			d := newTestArchive(t)
+			started := make(chan struct{}, 16)
+			release := make(chan struct{})
+			var active, peak, calls atomic.Int32
+			server, _ := modelServer(t, func(_ string, _ int) (int, string) {
+				calls.Add(1)
+				n := active.Add(1)
+				defer active.Add(-1)
+				for old := peak.Load(); n > old; old = peak.Load() {
+					if peak.CompareAndSwap(old, n) {
+						break
+					}
+				}
+				started <- struct{}{}
+				<-release
+				return http.StatusOK, completionBody(t, entriesJSON(t, "decision"))
+			})
+			defer func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			}()
+			for i := range 4 {
+				seedSession(t, d, fmt.Sprintf("parallel-%d", i), turnMessages("choose sqlite", "chosen"), nil)
+			}
+			m := newManager(t, d, server.URL, func(c *ManagerConfig) { c.Concurrency = 2 })
+			serial := newManager(t, d, server.URL, nil)
+			assert.Equal(t, serial.fingerprint, m.fingerprint, "scheduling must not rebuild the corpus")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			type pass struct {
+				result PassResult
+				err    error
+			}
+			done := make(chan pass, 1)
+			go func() { r, err := m.RunPass(ctx, PassOptions{}); done <- pass{r, err} }()
+			for range 2 {
+				select {
+				case <-started:
+				case <-time.After(3 * time.Second):
+					t.Fatal("independent sessions did not overlap")
+				}
+			}
+			if interrupt {
+				cancel()
+			}
+			close(release)
+			var first pass
+			select {
+			case first = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("pass did not join workers")
+			}
+			if interrupt {
+				require.Error(t, first.err)
+				_, err := m.RunPass(context.Background(), PassOptions{})
+				require.NoError(t, err)
+			} else {
+				require.NoError(t, first.err)
+				assert.Equal(t, 4, first.result.Sessions)
+			}
+			assert.Equal(t, int32(2), peak.Load())
+			status, err := m.Status(context.Background())
+			require.NoError(t, err)
+			assert.Zero(t, status.EligibleBacklog)
+			assert.Equal(t, 4, status.Stats.Done)
+			before := calls.Load()
+			_, err = m.RunPass(context.Background(), PassOptions{Full: true})
+			require.NoError(t, err)
+			assert.Equal(t, before, calls.Load(), "committed units must not be distilled again")
+		})
+	}
+}
