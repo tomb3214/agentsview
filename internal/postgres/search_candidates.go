@@ -65,13 +65,25 @@ func (s *Store) searchCandidatesPG(ctx context.Context, f db.ContentSearchFilter
 	fields := "d.doc_key,d.session_id,d.content_hash,d.ordinal,d.ordinal_end,d.content,s.machine,s.project,s.agent"
 	from := " FROM vector_documents d JOIN sessions s ON s.id=d.session_id "
 	param := fmt.Sprintf("$%d", len(args)+1)
-	keyword := "SELECT " + fields + ",to_json(pdb.snippet_positions(d.content,1))::text" + from +
-		"WHERE " + scope + " AND EXISTS (SELECT 1 FROM " + v.chunkTable + " c WHERE c.doc_key=d.doc_key) AND d.content ||| " + param +
+	// Select qualified keys before highlighting so full passage extraction is
+	// bounded by the ranked page. Both reads share this repeatable-read snapshot.
+	keyword := "SELECT d.doc_key FROM vector_documents d WHERE " + scope +
+		" AND EXISTS (SELECT 1 FROM " + v.chunkTable + " c WHERE c.doc_key=d.doc_key) AND d.content ||| " + param +
 		" ORDER BY pdb.score(d.doc_key) DESC,d.doc_key COLLATE \"C\" LIMIT 100"
-	lexical, err := scanCandidateRows(ctx, tx, keyword, append(append([]any{}, args...), f.Pattern), v.maxInputChars, true)
+	keys, err := scanKeywordCandidateKeys(ctx, tx, keyword, append(append([]any{}, args...), f.Pattern))
 	if err != nil {
-		return db.ContentSearchPage{}, fmt.Errorf("BM25 candidates: %w", err)
+		return db.ContentSearchPage{}, fmt.Errorf("BM25 candidate keys: %w", err)
 	}
+	lexical := []db.SearchCandidate{}
+	if len(keys) > 0 {
+		passages := "SELECT " + fields + ",to_json(pdb.snippet_positions(d.content,1))::text" + from +
+			"WHERE d.doc_key=ANY($2) AND d.content ||| $1 ORDER BY array_position($2,d.doc_key)"
+		lexical, err = scanCandidateRows(ctx, tx, passages, []any{f.Pattern, keys}, v.maxInputChars, true)
+		if err != nil {
+			return db.ContentSearchPage{}, fmt.Errorf("BM25 candidate passages: %w", err)
+		}
+	}
+
 	distance := "c.embedding OPERATOR(" + ext + ".<=>) " + param + "::" + ext + ".halfvec"
 	semantic := "SELECT " + fields + ",c.chunk_index" + from + " JOIN " + v.chunkTable + " c ON c.doc_key=d.doc_key WHERE " + scope +
 		" ORDER BY " + distance + ",d.doc_key COLLATE \"C\",c.chunk_index LIMIT 100"
@@ -83,6 +95,23 @@ func (s *Store) searchCandidatesPG(ctx context.Context, f db.ContentSearchFilter
 		return db.ContentSearchPage{}, err
 	}
 	return db.ContentSearchPage{Matches: []db.ContentMatch{}, Rankings: [][]db.SearchCandidate{lexical, vectors}, Generation: v.genID, LexicalMethod: "bm25"}, nil
+}
+
+func scanKeywordCandidateKeys(ctx context.Context, tx *sql.Tx, query string, args []any) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	keys := make([]string, 0, 100)
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
 }
 
 func scanCandidateRows(ctx context.Context, tx *sql.Tx, query string, args []any, maxRunes int, keyword bool) ([]db.SearchCandidate, error) {
