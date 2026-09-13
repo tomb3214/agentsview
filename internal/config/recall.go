@@ -402,6 +402,9 @@ func (c *Config) mergeRecallExtractTOML(file RecallConfig, meta toml.MetaData) {
 	if len(file.Extract.Servers) > 0 {
 		extract.Servers = normalizedRecallExtractServers(file.Extract.Servers)
 	}
+	if meta.IsDefined("recall", "extract", "concurrency") {
+		extract.Concurrency = file.Extract.Concurrency
+	}
 	if meta.IsDefined("recall", "extract", "max_window_chars") {
 		extract.MaxWindowChars = file.Extract.MaxWindowChars
 	}
