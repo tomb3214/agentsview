@@ -352,6 +352,39 @@ func buildRecallEvidenceWindow(
 	return window, nil
 }
 
+// NewRecallEvidenceWindow binds an already loaded host transcript range. Other
+// storage backends use the same content and authorization digests as SQLite;
+// callers must supply messages read from their authorized database snapshot.
+func NewRecallEvidenceWindow(
+	sessionID string, start, end int, messages []RecallEvidenceWindowMessage,
+) (RecallEvidenceWindow, error) {
+	if strings.TrimSpace(sessionID) == "" || start < 0 || end < start || len(messages) != end-start+1 {
+		return RecallEvidenceWindow{}, invalidRecallEvidencef("invalid evidence window %s:%d-%d", sessionID, start, end)
+	}
+	window := RecallEvidenceWindow{
+		SessionID: sessionID, MessageStartOrdinal: start, MessageEndOrdinal: end, Messages: messages,
+	}
+	toolIDs := make(map[string]struct{})
+	for i, message := range messages {
+		if message.Ordinal != start+i {
+			return RecallEvidenceWindow{}, invalidRecallEvidencef("evidence window is missing ordinal %d", start+i)
+		}
+		for _, call := range message.ToolCalls {
+			if call.ToolUseID != "" {
+				toolIDs[call.ToolUseID] = struct{}{}
+			}
+		}
+	}
+	window.AllowedToolUseIDs = make([]string, 0, len(toolIDs))
+	for id := range toolIDs {
+		window.AllowedToolUseIDs = append(window.AllowedToolUseIDs, id)
+	}
+	sort.Strings(window.AllowedToolUseIDs)
+	digest, err := recallEvidenceAuthorizationDigest(window)
+	window.AuthorizationDigest = digest
+	return window, err
+}
+
 // BindSelection validates that an extractor selection is contained within the
 // host authorization and returns durable metadata derived from that host-owned
 // window. Duplicate tool IDs are normalized to a sorted unique list.

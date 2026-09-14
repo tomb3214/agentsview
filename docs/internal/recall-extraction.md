@@ -437,3 +437,54 @@ seam yet. They also reject `--server` rather than silently operating on the
 local archive while the user targets a remote daemon, and they hold the offline
 writer lock for their lifetime, so a multi-step extraction pass can never
 overlap another direct writer or a resync swapping the database underneath it.
+
+## Central PostgreSQL extraction
+
+The default store remains the local SQLite archive. An existing daemon can
+instead coordinate admitted PostgreSQL archives through
+`[[recall.extract.postgres_sources]]`, with one `machine`, absolute `url_file`,
+and optional `schema` (default `agentsview`) per source. `url_file` references
+an existing protected connection URL file; it does not copy credentials into
+the TOML configuration. Connections retain their normal TLS policy and database
+permissions. The extractor neither migrates schema nor grants access.
+
+All configured sources feed one manager. `concurrency = 8` means eight sessions
+in total, with each session's units processed sequentially. Original session,
+entry, generation and evidence identities are retained. These storage settings
+are outside the extraction fingerprint. PostgreSQL progress compares exact
+source update timestamps rather than wall-clock discovery watermarks, because
+a source transaction can commit after a scan with an earlier timestamp.
+
+Use a schema-first handover with active publishers upgraded before central
+extraction starts. Stop the previous model producer at its normal checkpoint
+boundary and complete a final ordinary Recall publication. That publication
+copies generation metadata, progress, entries and evidence from one SQLite
+snapshot in one PostgreSQL transaction. Even a successful unit producing zero
+entries changes the checkpoint publication revision. The first central pass
+rehashes the current source and reuses matching accepted unit cursors, without
+repeating model work.
+
+Starting a central pass claims automatic publication ownership for each source
+under the same database lock used by publication. Subsequent upgraded clients
+continue publishing human-curated entries but cannot replace centrally owned
+automatic output or progress with their older local snapshots. Managed database
+policies can enforce the transaction-local `agentsview.recall_write_protocol=v1`
+marker used by the upgraded publisher and coordinator. It is a compatibility
+marker; existing machine-role policies still enforce access. With those policies,
+older binaries cannot modify central output or reintroduce older automatic
+generations, and incompatible publications fail until the publisher is upgraded.
+Install those policies before claiming central ownership.
+Disabling central extraction does not relinquish that ownership.
+
+Generation activation is atomic per source machine. The group checks every
+source's coverage and nonempty output before activation; a partial group
+activation is retryable, not a cross-database transaction. Configure sources
+with eligible work. Source deletion or automation classification hides automatic
+entries at read time while the existing reconciliation pass handles storage
+cleanup. Human-curated entries keep their existing lifecycle.
+
+Extraction run, status, activation and retirement use the configured stores.
+The daemon uses its existing startup/backstop scheduler and closes database
+connections after in-flight work stops. `preview` remains the existing chunk
+inspection command against the selected viewer/archive; it does not run a
+central extraction pass or manage checkpoints.

@@ -7,6 +7,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +40,7 @@ var ErrPassRunning = errors.New("recall extraction pass is running")
 type ManagerConfig struct {
 	// Concurrency bounds independently checkpointed sessions. Zero defaults to one.
 	Concurrency int
-	DB          *db.DB
+	DB          Store
 	Client      *Client
 	Segmenter   TurnsV1
 	Prompts     map[PromptRole]string
@@ -134,7 +135,8 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if cfg.Concurrency == 0 {
 		cfg.Concurrency = 1
 	}
-	if cfg.DB == nil {
+	databaseValue := reflect.ValueOf(cfg.DB)
+	if !databaseValue.IsValid() || (databaseValue.Kind() == reflect.Pointer && databaseValue.IsNil()) {
 		return nil, fmt.Errorf("extraction manager requires a database")
 	}
 	if cfg.Client == nil {
@@ -622,6 +624,7 @@ func (m *Manager) extractSession(
 					ContentDigest: digest,
 					UnitsTotal:    len(units),
 					StampedAt:     readCutoff,
+					Session:       session,
 				},
 			)
 			if err != nil {
@@ -703,6 +706,7 @@ func (m *Manager) extractSession(
 				ContentDigest: digest,
 				UnitsTotal:    len(units),
 				StampedAt:     readCutoff,
+				Session:       session,
 			},
 		)
 		if err != nil {

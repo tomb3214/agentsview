@@ -281,7 +281,7 @@ func runServe(cfg config.Config, opts serveOptions) {
 		fatal("setting up recall extraction: %v", err)
 	}
 	if extractSched != nil {
-		if vectorServe.RecallMutationNotify != nil {
+		if vectorServe.RecallMutationNotify != nil && len(cfg.Recall.Extract.PostgresSources) == 0 {
 			extractSched.onPassFinished = vectorServe.RecallMutationNotify
 		}
 		emitter = extractTeeEmitter{primary: emitter, scheduler: extractSched}
