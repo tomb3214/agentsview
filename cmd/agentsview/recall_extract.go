@@ -144,7 +144,7 @@ func buildExtractManager(
 func setupRecallExtraction(
 	cfg config.Config, database *db.DB, idle *server.IdleTracker,
 ) (*extractScheduler, error) {
-	store, closeStore, err := openConfiguredExtractStore(cfg.Recall.Extract, database)
+	store, closeStore, err := openConfiguredExtractStore(cfg, database)
 	if err != nil {
 		return nil, err
 	}
@@ -323,7 +323,7 @@ func newRecallExtractRunCommand() *cobra.Command {
 			}
 			defer func() { _ = lock.Close() }()
 			defer database.Close()
-			mgr, closeStore, err := buildConfiguredExtractManager(cfg.Recall.Extract, database)
+			mgr, closeStore, err := buildConfiguredExtractManager(cfg, database)
 			if err != nil {
 				return err
 			}
@@ -390,7 +390,7 @@ func newRecallExtractStatusCommand() *cobra.Command {
 				return err
 			}
 			defer database.Close()
-			mgr, closeStore, err := buildConfiguredExtractManager(cfg.Recall.Extract, database)
+			mgr, closeStore, err := buildConfiguredExtractManager(cfg, database)
 			if err != nil {
 				return err
 			}
@@ -452,7 +452,7 @@ func newRecallExtractActivateCommand() *cobra.Command {
 			}
 			defer func() { _ = lock.Close() }()
 			defer database.Close()
-			mgr, closeStore, err := buildConfiguredExtractManager(cfg.Recall.Extract, database)
+			mgr, closeStore, err := buildConfiguredExtractManager(cfg, database)
 			if err != nil {
 				return err
 			}
@@ -486,7 +486,7 @@ func newRecallExtractRetireCommand() *cobra.Command {
 			}
 			defer func() { _ = lock.Close() }()
 			defer database.Close()
-			store, closeStore, err := openConfiguredExtractStore(cfg.Recall.Extract, database)
+			store, closeStore, err := openConfiguredExtractStore(cfg, database)
 			if err != nil {
 				return err
 			}

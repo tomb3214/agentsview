@@ -14,10 +14,11 @@ import (
 // openConfiguredExtractStore opens only the configured source roles. It never
 // changes schema or grants permissions. The daemon's existing writer lifetime
 // owns these connections, and its existing scheduler owns the single manager.
-func openConfiguredExtractStore(cfg config.RecallExtractConfig, local extract.Store) (extract.Store, func(), error) {
-	if len(cfg.PostgresSources) == 0 {
+func openConfiguredExtractStore(cfg config.Config, local extract.Store) (extract.Store, func(), error) {
+	if len(cfg.Recall.Extract.PostgresSources) == 0 {
 		return local, func() {}, nil
 	}
+	applyClassifierConfig(cfg)
 	var connections []*sql.DB
 	closeStore := func() {
 		for _, connection := range connections {
@@ -25,7 +26,7 @@ func openConfiguredExtractStore(cfg config.RecallExtractConfig, local extract.St
 		}
 	}
 	var stores []*postgres.RecallExtractStore
-	for _, source := range cfg.PostgresSources {
+	for _, source := range cfg.Recall.Extract.PostgresSources {
 		raw, err := os.ReadFile(source.URLFile)
 		if err != nil {
 			closeStore()
@@ -61,12 +62,12 @@ func openConfiguredExtractStore(cfg config.RecallExtractConfig, local extract.St
 	return group, closeStore, nil
 }
 
-func buildConfiguredExtractManager(cfg config.RecallExtractConfig, local extract.Store) (*extract.Manager, func(), error) {
+func buildConfiguredExtractManager(cfg config.Config, local extract.Store) (*extract.Manager, func(), error) {
 	store, closeStore, err := openConfiguredExtractStore(cfg, local)
 	if err != nil {
 		return nil, nil, err
 	}
-	manager, err := buildExtractManager(cfg, store)
+	manager, err := buildExtractManager(cfg.Recall.Extract, store)
 	if err != nil {
 		closeStore()
 		return nil, nil, err
