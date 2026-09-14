@@ -205,6 +205,10 @@ func (s *RecallExtractStore) begin(ctx context.Context) (*sql.Tx, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := setPGRecallWriteProtocol(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
 		"agentsview:recall-extract:"+s.machine); err != nil {
 		_ = tx.Rollback()

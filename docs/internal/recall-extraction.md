@@ -455,7 +455,7 @@ are outside the extraction fingerprint. PostgreSQL progress compares exact
 source update timestamps rather than wall-clock discovery watermarks, because
 a source transaction can commit after a scan with an earlier timestamp.
 
-Use a schema-first handover with all publishers upgraded before central
+Use a schema-first handover with active publishers upgraded before central
 extraction starts. Stop the previous model producer at its normal checkpoint
 boundary and complete a final ordinary Recall publication. That publication
 copies generation metadata, progress, entries and evidence from one SQLite
@@ -467,8 +467,13 @@ repeating model work.
 Starting a central pass claims automatic publication ownership for each source
 under the same database lock used by publication. Subsequent upgraded clients
 continue publishing human-curated entries but cannot replace centrally owned
-automatic output or progress with their older local snapshots. Older publisher
-binaries do not implement this ownership protocol and must not remain active.
+automatic output or progress with their older local snapshots. Managed database
+policies can enforce the transaction-local `agentsview.recall_write_protocol=v1`
+marker used by the upgraded publisher and coordinator. It is a compatibility
+marker; existing machine-role policies still enforce access. With those policies,
+older binaries cannot modify central output or reintroduce older automatic
+generations, and incompatible publications fail until the publisher is upgraded.
+Install those policies before claiming central ownership.
 Disabling central extraction does not relinquish that ownership.
 
 Generation activation is atomic per source machine. The group checks every

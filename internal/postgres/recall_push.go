@@ -12,6 +12,14 @@ import (
 
 const recallPublicationRevisionStateKey = "recall_publication_revision_v1"
 
+// This transaction-local protocol marker lets managed database policies reject
+// pre-handover publishers. It is a compatibility marker, not authentication;
+// machine-role policies remain the access boundary.
+func setPGRecallWriteProtocol(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `SELECT set_config('agentsview.recall_write_protocol', 'v1', true)`)
+	return err
+}
+
 // PushRecall publishes only the local Recall corpus and its bounded evidence.
 // It deliberately skips session, message, curation, pricing, and vector
 // publication so a verified recovery archive can restore derived Recall state
@@ -43,6 +51,9 @@ func (s *Sync) syncRecallPublication(
 		return fmt.Errorf("beginning Recall publication: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := setPGRecallWriteProtocol(ctx, tx); err != nil {
+		return fmt.Errorf("setting Recall publication protocol: %w", err)
+	}
 	// The extraction coordinator claims a machine under this same lock. A
 	// publisher either supplies the final local checkpoints or observes that
 	// central extraction owns them; it cannot overwrite a newly accepted unit.
