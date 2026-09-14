@@ -34,7 +34,7 @@ func openConfiguredExtractStore(cfg config.RecallExtractConfig, local extract.St
 		dsn := strings.TrimSpace(string(raw))
 		if dsn == "" {
 			closeStore()
-			return nil, nil, fmt.Errorf("Recall source %s URL file is empty", source.Machine)
+			return nil, nil, fmt.Errorf("recall source %s URL file is empty", source.Machine)
 		}
 		schema := source.Schema
 		if schema == "" {
