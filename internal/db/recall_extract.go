@@ -553,6 +553,9 @@ type ExtractProgressUpsert struct {
 	ContentDigest string
 	UnitsTotal    int
 	StampedAt     time.Time
+	// Session carries the bracketed snapshot for backends whose source write
+	// timestamps are transaction-start times rather than commit times.
+	Session *Session
 }
 
 // UpsertExtractProgress ensures a progress row exists for the session under

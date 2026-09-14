@@ -120,7 +120,7 @@ func resolveExtractDistillation(
 
 // buildExtractManager resolves cfg into an extraction Manager over database.
 func buildExtractManager(
-	cfg config.RecallExtractConfig, database *db.DB,
+	cfg config.RecallExtractConfig, database extract.Store,
 ) (*extract.Manager, error) {
 	dist, err := resolveExtractDistillation(cfg)
 	if err != nil {

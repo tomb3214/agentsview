@@ -1059,6 +1059,7 @@ func TestNewManagerValidatesConfig(t *testing.T) {
 		mutate func(*ManagerConfig)
 	}{
 		{"missing db", func(c *ManagerConfig) { c.DB = nil }},
+		{"typed nil db", func(c *ManagerConfig) { c.DB = (*db.DB)(nil) }},
 		{"missing client", func(c *ManagerConfig) { c.Client = nil }},
 		{"zero window", func(c *ManagerConfig) { c.Segmenter.MaxWindowChars = 0 }},
 		{"missing prompt role", func(c *ManagerConfig) {

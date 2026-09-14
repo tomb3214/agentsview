@@ -398,6 +398,44 @@ CREATE INDEX IF NOT EXISTS idx_recall_evidence_entry
 CREATE INDEX IF NOT EXISTS idx_recall_evidence_session
     ON recall_evidence (session_id);
 
+CREATE TABLE IF NOT EXISTS recall_extract_generations (
+    machine TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('building', 'active', 'retired')),
+    model TEXT NOT NULL,
+    segmenter TEXT NOT NULL,
+    params_json TEXT NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (machine, fingerprint)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recall_extract_active
+    ON recall_extract_generations(machine) WHERE state='active';
+
+CREATE TABLE IF NOT EXISTS recall_extract_progress (
+    machine TEXT NOT NULL,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    generation_fingerprint TEXT NOT NULL,
+    unit_cursor INT NOT NULL DEFAULT 0 CHECK (unit_cursor >= 0),
+    units_total INT NOT NULL CHECK (units_total >= unit_cursor),
+    state TEXT NOT NULL CHECK (state IN ('pending', 'partial', 'done', 'failed')),
+    content_digest TEXT NOT NULL,
+    content_stamped_at TIMESTAMPTZ,
+    source_modified_at TIMESTAMPTZ,
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (machine, session_id, generation_fingerprint),
+    FOREIGN KEY (machine, generation_fingerprint)
+        REFERENCES recall_extract_generations(machine, fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_recall_extract_retry
+    ON recall_extract_progress(machine, generation_fingerprint, state, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_extract_changed
+    ON sessions(machine, updated_at, id);
+
 CREATE TABLE IF NOT EXISTS model_pricing (
     model_pattern TEXT PRIMARY KEY,
     input_microdollars_per_mtok BIGINT NOT NULL DEFAULT 0,
