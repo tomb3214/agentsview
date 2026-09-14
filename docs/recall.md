@@ -25,9 +25,10 @@ default remains lexical while this feature is experimental.
 
 Recall stores local work in SQLite and supports PostgreSQL publication and
 lexical reads. Automatic extraction can also use configured PostgreSQL source
-archives through the existing daemon; see the
-[extraction design](internal/recall-extraction.md#central-postgresql-extraction)
-for its handover and ownership requirements. The CLI provides:
+archives through the existing daemon using `recall.extract.postgres_sources`.
+Install the schema and upgrade active publishers before transferring the
+producer; the handover preserves accepted unit checkpoints and gives the
+coordinator ownership of automatic publication. The CLI provides:
 
 - `recall list`, `get`, and `stats` for inspection;
 - `recall query` for ranked lexical, vector, or hybrid retrieval;
