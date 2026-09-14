@@ -288,6 +288,9 @@ func extractAffected(result sql.Result, err error) error {
 	if err != nil {
 		return err
 	}
+	if result == nil {
+		return fmt.Errorf("extraction statement returned no result")
+	}
 	n, err := result.RowsAffected()
 	if err == nil && n == 0 {
 		return db.ErrStaleExtractProgress
