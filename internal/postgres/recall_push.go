@@ -29,7 +29,7 @@ func (s *Sync) syncRecallPublication(
 	if err != nil {
 		return fmt.Errorf("reading local Recall publication: %w", err)
 	}
-	version := s.databaseGeneration + "\x00" + snapshot.Revision
+	version := s.databaseGeneration + "\x00" + snapshot.Revision + "\x00" + snapshot.ExtractionRevision
 	previous, err := state.GetSyncState(recallPublicationRevisionStateKey)
 	if err != nil {
 		return fmt.Errorf("reading Recall publication state: %w", err)
@@ -43,13 +43,53 @@ func (s *Sync) syncRecallPublication(
 		return fmt.Errorf("beginning Recall publication: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// The extraction coordinator claims a machine under this same lock. A
+	// publisher either supplies the final local checkpoints or observes that
+	// central extraction owns them; it cannot overwrite a newly accepted unit.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		"agentsview:recall-extract:"+s.machine); err != nil {
+		return fmt.Errorf("locking Recall publication: %w", err)
+	}
+	var coordinated bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1 FROM recall_extract_generations WHERE machine=$1 AND coordinated
+	)`, s.machine).Scan(&coordinated); err != nil {
+		return fmt.Errorf("reading Recall extraction ownership: %w", err)
+	}
 	if err := deletePGRecallPublicationScope(
-		ctx, tx, s.machine, s.projects, s.excludeProjects,
+		ctx, tx, s.machine, s.projects, s.excludeProjects, coordinated,
 	); err != nil {
 		return err
 	}
-	if err := insertPGRecallPublication(ctx, tx, s.machine, snapshot.Entries); err != nil {
+	entries := snapshot.Entries
+	if coordinated {
+		entries = nil
+		for _, entry := range snapshot.Entries {
+			if entry.ReviewState != "unreviewed_auto" {
+				entries = append(entries, entry)
+			}
+		}
+		// A human can curate an entry originally accepted by the coordinator.
+		// Replace that exact entry (and its evidence), then retain normal local
+		// publication ownership for subsequent edits and deletions.
+		for start := 0; start < len(entries); start += 100 {
+			ids := make([]string, 0, min(100, len(entries)-start))
+			for _, entry := range entries[start:min(start+100, len(entries))] {
+				ids = append(ids, entry.ID)
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM recall_entries
+				WHERE machine=$1 AND id=ANY($2::text[])`, s.machine, ids); err != nil {
+				return fmt.Errorf("replacing curated Recall entries: %w", err)
+			}
+		}
+	}
+	if err := insertPGRecallPublication(ctx, tx, s.machine, entries); err != nil {
 		return err
+	}
+	if !coordinated {
+		if err := mirrorPGRecallExtraction(ctx, tx, s.machine, s.projects, s.excludeProjects, snapshot); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing Recall publication: %w", err)
@@ -59,7 +99,7 @@ func (s *Sync) syncRecallPublication(
 	}
 	log.Printf(
 		"pgsync: published %d Recall entr%s for machine %s",
-		len(snapshot.Entries), pluralSuffix(len(snapshot.Entries), "y", "ies"), s.machine,
+		len(entries), pluralSuffix(len(entries), "y", "ies"), s.machine,
 	)
 	return nil
 }
@@ -153,7 +193,28 @@ func deletePGRecallPublicationScope(
 	tx *sql.Tx,
 	machine string,
 	projects, excludeProjects []string,
+	coordinated bool,
 ) error {
+	predicate, args := pgRecallPublicationScope(machine, projects, excludeProjects)
+	ownership := ""
+	if coordinated {
+		ownership = " AND publication_owner='local'"
+	}
+	_, err := tx.ExecContext(ctx, `
+		DELETE FROM recall_entries
+		WHERE machine = $1`+ownership+`
+		  AND EXISTS (
+			SELECT 1 FROM sessions
+			WHERE sessions.id = recall_entries.source_session_id
+			  AND `+predicate+`
+		)`, args...)
+	if err != nil {
+		return fmt.Errorf("clearing prior Recall publication scope: %w", err)
+	}
+	return nil
+}
+
+func pgRecallPublicationScope(machine string, projects, excludeProjects []string) (string, []any) {
 	args := []any{machine}
 	predicate := "TRUE"
 	values := projects
@@ -177,16 +238,55 @@ func deletePGRecallPublicationScope(
 				strings.Join(placeholders, ",") + ")"
 		}
 	}
-	_, err := tx.ExecContext(ctx, `
-		DELETE FROM recall_entries
-		WHERE machine = $1
-		  AND EXISTS (
-			SELECT 1 FROM sessions
-			WHERE sessions.id = recall_entries.source_session_id
-			  AND `+predicate+`
-		)`, args...)
-	if err != nil {
-		return fmt.Errorf("clearing prior Recall publication scope: %w", err)
+	return predicate, args
+}
+
+// A local snapshot carries its accepted units and entries in the same
+// transaction. PostgreSQL source stamps intentionally remain NULL: the first
+// central pass rechecks the current transcript and rebinds unchanged completed
+// work before advancing. SQLite timestamps cannot stand in for PG revisions.
+func mirrorPGRecallExtraction(ctx context.Context, tx *sql.Tx, machine string,
+	projects, excludeProjects []string, snapshot db.RecallPublicationSnapshot,
+) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE recall_extract_generations
+		SET state='retired' WHERE machine=$1 AND state='active' AND NOT coordinated`, machine); err != nil {
+		return fmt.Errorf("preparing local Recall generations: %w", err)
+	}
+	for _, gen := range snapshot.Generations {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO recall_extract_generations
+			(machine,fingerprint,state,model,segmenter,params_json,created_at,updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz,$8::timestamptz)
+			ON CONFLICT (machine,fingerprint) DO UPDATE SET state=EXCLUDED.state,
+			model=EXCLUDED.model,segmenter=EXCLUDED.segmenter,params_json=EXCLUDED.params_json,
+			created_at=EXCLUDED.created_at,updated_at=EXCLUDED.updated_at`, machine,
+			gen.Fingerprint, gen.State, gen.Model, gen.Segmenter, gen.ParamsJSON, gen.CreatedAt, gen.UpdatedAt); err != nil {
+			return fmt.Errorf("publishing local Recall generation: %w", err)
+		}
+	}
+	predicate, args := pgRecallPublicationScope(machine, projects, excludeProjects)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM recall_extract_progress p WHERE machine=$1
+		AND EXISTS (SELECT 1 FROM sessions WHERE sessions.id=p.session_id AND `+predicate+`)`, args...); err != nil {
+		return fmt.Errorf("clearing local Recall checkpoints: %w", err)
+	}
+	for start := 0; start < len(snapshot.Progress); start += 100 {
+		batch := snapshot.Progress[start:min(start+100, len(snapshot.Progress))]
+		values := make([]string, 0, len(batch))
+		args := make([]any, 0, len(batch)*9)
+		for _, p := range batch {
+			params := make([]string, 9)
+			for i := range params {
+				params[i] = fmt.Sprintf("$%d", len(args)+i+1)
+			}
+			params[8] += "::timestamptz"
+			values = append(values, "("+strings.Join(params, ",")+")")
+			args = append(args, machine, p.SessionID, p.GenerationFingerprint, p.UnitCursor,
+				p.UnitsTotal, p.State, p.ContentDigest, p.LastError, p.UpdatedAt)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO recall_extract_progress
+			(machine,session_id,generation_fingerprint,unit_cursor,units_total,state,content_digest,last_error,updated_at)
+			VALUES `+strings.Join(values, ","), args...); err != nil {
+			return fmt.Errorf("publishing local Recall checkpoints: %w", err)
+		}
 	}
 	return nil
 }

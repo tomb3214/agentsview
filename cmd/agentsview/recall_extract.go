@@ -144,15 +144,27 @@ func buildExtractManager(
 func setupRecallExtraction(
 	cfg config.Config, database *db.DB, idle *server.IdleTracker,
 ) (*extractScheduler, error) {
-	if !cfg.Recall.Extract.Enabled {
-		return setupExtractReconcileOnly(database, idle)
-	}
-	dist, err := resolveExtractDistillation(cfg.Recall.Extract)
+	store, closeStore, err := openConfiguredExtractStore(cfg.Recall.Extract, database)
 	if err != nil {
 		return nil, err
 	}
-	mgr, err := buildExtractManager(cfg.Recall.Extract, database)
+	if !cfg.Recall.Extract.Enabled {
+		scheduler, err := setupExtractReconcileOnly(store, idle)
+		if err != nil || scheduler == nil {
+			closeStore()
+		} else {
+			scheduler.closeStore = closeStore
+		}
+		return scheduler, err
+	}
+	dist, err := resolveExtractDistillation(cfg.Recall.Extract)
 	if err != nil {
+		closeStore()
+		return nil, err
+	}
+	mgr, err := buildExtractManager(cfg.Recall.Extract, store)
+	if err != nil {
+		closeStore()
 		return nil, err
 	}
 	backstop := max(dist.Backstop, 0)
@@ -160,9 +172,11 @@ func setupRecallExtraction(
 	// never faster than once a minute) keep scanning so a session whose
 	// quiet period elapses after the last sync still gets extracted.
 	catchup := max(dist.Quiet, time.Minute)
-	return newExtractScheduler(
+	scheduler := newExtractScheduler(
 		mgr, extractDebounceInterval, backstop, catchup, idle,
-	), nil
+	)
+	scheduler.closeStore = closeStore
+	return scheduler, nil
 }
 
 // setupExtractReconcileOnly wires a scheduler that only retracts the
@@ -174,7 +188,7 @@ func setupRecallExtraction(
 // extraction was never run, so there is nothing to retract and a
 // default-disabled daemon starts no scheduler.
 func setupExtractReconcileOnly(
-	database *db.DB, idle *server.IdleTracker,
+	database extract.Store, idle *server.IdleTracker,
 ) (*extractScheduler, error) {
 	generations, err := database.ExtractGenerations(context.Background())
 	if err != nil {
@@ -230,9 +244,8 @@ func openWritableExtractDB(
 }
 
 func loadExtractConfig(cmd *cobra.Command) (config.Config, error) {
-	// These commands operate on the local archive only; silently reading
-	// local state while the user targets a remote daemon would be worse
-	// than refusing.
+	// These commands operate on this profile's configured extraction store;
+	// remote daemon management is not supported by the extraction command.
 	if remote, _ := cmd.Flags().GetString("server"); strings.TrimSpace(remote) != "" {
 		return config.Config{}, fmt.Errorf(
 			"recall extract %s does not support --server: extraction runs "+
@@ -310,10 +323,11 @@ func newRecallExtractRunCommand() *cobra.Command {
 			}
 			defer func() { _ = lock.Close() }()
 			defer database.Close()
-			mgr, err := buildExtractManager(cfg.Recall.Extract, database)
+			mgr, closeStore, err := buildConfiguredExtractManager(cfg.Recall.Extract, database)
 			if err != nil {
 				return err
 			}
+			defer closeStore()
 			result, err := mgr.RunPass(cmd.Context(), extract.PassOptions{
 				SessionID: strings.TrimSpace(sessionID),
 				Full:      full,
@@ -376,10 +390,11 @@ func newRecallExtractStatusCommand() *cobra.Command {
 				return err
 			}
 			defer database.Close()
-			mgr, err := buildExtractManager(cfg.Recall.Extract, database)
+			mgr, closeStore, err := buildConfiguredExtractManager(cfg.Recall.Extract, database)
 			if err != nil {
 				return err
 			}
+			defer closeStore()
 			status, err := mgr.Status(cmd.Context())
 			if err != nil {
 				return err
@@ -437,10 +452,11 @@ func newRecallExtractActivateCommand() *cobra.Command {
 			}
 			defer func() { _ = lock.Close() }()
 			defer database.Close()
-			mgr, err := buildExtractManager(cfg.Recall.Extract, database)
+			mgr, closeStore, err := buildConfiguredExtractManager(cfg.Recall.Extract, database)
 			if err != nil {
 				return err
 			}
+			defer closeStore()
 			if err := mgr.Activate(cmd.Context()); err != nil {
 				return err
 			}
@@ -470,7 +486,12 @@ func newRecallExtractRetireCommand() *cobra.Command {
 			}
 			defer func() { _ = lock.Close() }()
 			defer database.Close()
-			if err := database.RetireExtractGeneration(
+			store, closeStore, err := openConfiguredExtractStore(cfg.Recall.Extract, database)
+			if err != nil {
+				return err
+			}
+			defer closeStore()
+			if err := store.RetireExtractGeneration(
 				cmd.Context(), args[0], force,
 			); err != nil {
 				return err

@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -28,6 +29,10 @@ type RecallConfig struct {
 // transport only and deliberately outside that identity — moving the same
 // deployment to a new address must not orphan the corpus.
 type RecallExtractConfig struct {
+	// PostgresSources selects central source archives instead of the local
+	// SQLite archive. Every source retains its own machine identity and role.
+	// These are storage settings, excluded from the extraction fingerprint.
+	PostgresSources []RecallExtractPostgresSource `toml:"postgres_sources" json:"postgres_sources,omitempty"`
 	// Concurrency overlaps independent sessions; zero preserves serial processing.
 	// This is scheduling only and does not change the extraction fingerprint.
 	Concurrency int    `toml:"concurrency" json:"concurrency"`
@@ -60,6 +65,13 @@ type RecallExtractConfig struct {
 	FailureBackoff string                     `toml:"failure_backoff" json:"failure_backoff"`
 	Prompts        RecallExtractPromptsConfig `toml:"prompts" json:"prompts"`
 	Request        RecallExtractRequestConfig `toml:"request" json:"request"`
+}
+
+type RecallExtractPostgresSource struct {
+	Machine       string `toml:"machine" json:"machine"`
+	URLFile       string `toml:"url_file" json:"url_file"`
+	Schema        string `toml:"schema" json:"schema,omitempty"`
+	AllowInsecure bool   `toml:"allow_insecure" json:"allow_insecure,omitempty"`
 }
 
 // RecallExtractServerConfig is one named extraction endpoint: transport
@@ -134,6 +146,13 @@ func (c RecallExtractConfig) ResolvedServer() (string, RecallExtractServerConfig
 // Validate checks the extraction config for internal consistency. It is a
 // no-op when the section is disabled.
 func (c RecallExtractConfig) Validate() error {
+	machines := make(map[string]bool)
+	for _, source := range c.PostgresSources {
+		if strings.TrimSpace(source.Machine) == "" || machines[source.Machine] || !filepath.IsAbs(source.URLFile) {
+			return fmt.Errorf("[recall.extract] postgres_sources requires distinct machine names and absolute url_file paths")
+		}
+		machines[source.Machine] = true
+	}
 	if !c.Enabled {
 		return nil
 	}
@@ -387,6 +406,9 @@ func sortedRecallServerNames(
 // over the defaults in c.
 func (c *Config) mergeRecallExtractTOML(file RecallConfig, meta toml.MetaData) {
 	extract := &c.Recall.Extract
+	if meta.IsDefined("recall", "extract", "postgres_sources") {
+		extract.PostgresSources = append([]RecallExtractPostgresSource(nil), file.Extract.PostgresSources...)
+	}
 	if file.Extract.Enabled {
 		extract.Enabled = true
 	}

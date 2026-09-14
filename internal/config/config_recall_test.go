@@ -386,6 +386,10 @@ func TestRecallExtractConfigTOMLLoad(t *testing.T) {
 				"deployment":  "gpu-a",
 				"server":      "local",
 				"max_tokens":  8192,
+				"postgres_sources": []map[string]any{
+					{"machine": "device-a", "url_file": "/etc/agentsview/device-a.url", "schema": "archive", "allow_insecure": true},
+					{"machine": "device-b", "url_file": "/etc/agentsview/device-b.url"},
+				},
 				"servers": map[string]any{
 					"local": map[string]any{
 						"endpoint": "http://127.0.0.1:30000/v1",
@@ -415,6 +419,9 @@ func TestRecallExtractConfigTOMLLoad(t *testing.T) {
 	extract := cfg.Recall.Extract
 	require.True(t, extract.Enabled)
 	assert.Equal(t, 8, extract.Concurrency, "configured workers survive file loading")
+	require.Len(t, extract.PostgresSources, 2)
+	assert.Equal(t, RecallExtractPostgresSource{Machine: "device-a", URLFile: "/etc/agentsview/device-a.url", Schema: "archive", AllowInsecure: true}, extract.PostgresSources[0])
+	assert.Equal(t, "device-b", extract.PostgresSources[1].Machine)
 	assert.Equal(t, "qwen3.5-27b", extract.Model)
 	assert.Equal(t, "gpu-a", extract.Deployment)
 	assert.Equal(t, "local", extract.Server)

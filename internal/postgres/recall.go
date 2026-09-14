@@ -13,6 +13,15 @@ import (
 
 const pgRecallCandidateLimit = 50000
 
+// A central extraction pass can outlive many source updates. Preserve the
+// extractor's eligibility boundary at read time, without waiting for its next
+// reconciliation pass. Human-reviewed entries retain their existing lifecycle.
+const pgRecallSourceEligible = `(review_state <> 'unreviewed_auto' OR EXISTS (
+	SELECT 1 FROM sessions recall_source
+	WHERE recall_source.id=recall_entries.source_session_id
+	AND recall_source.machine=recall_entries.machine
+	AND recall_source.deleted_at IS NULL AND NOT recall_source.is_automated))`
+
 const pgRecallCols = `id, machine, type, scope, status, review_state, title,
 	body, trigger, confidence, uncertainty, project, cwd, git_branch, agent,
 	source_session_id, source_episode_id, source_run_id, extractor_method,
@@ -49,7 +58,7 @@ func (s *Store) GetRecallEntry(
 	ctx context.Context, id string,
 ) (*db.RecallEntry, error) {
 	entry, err := scanPGRecallEntry(s.pg.QueryRowContext(
-		ctx, "SELECT "+pgRecallCols+" FROM recall_entries WHERE id = $1", id,
+		ctx, "SELECT "+pgRecallCols+" FROM recall_entries WHERE id = $1 AND "+pgRecallSourceEligible, id,
 	))
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -231,7 +240,7 @@ func (s *Store) attachPGRecallEvidence(
 }
 
 func pgRecallWhere(query db.RecallQuery) (string, []any) {
-	predicates := []string{"1=1"}
+	predicates := []string{pgRecallSourceEligible}
 	args := []any{}
 	add := func(sql string, value any) {
 		args = append(args, value)

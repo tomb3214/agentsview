@@ -595,6 +595,8 @@ func TestSyncEnsureSchemaSkipsLegacyDDLWhenSchemaCompatible(t *testing.T) {
 		"source_worktree_project_mapping_scopes":          true,
 		"recall_entries":                                  true,
 		"recall_evidence":                                 true,
+		"recall_extract_generations":                      true,
+		"recall_extract_progress":                         true,
 		"cursor_usage_events":                             true,
 	}
 	state.existingIndexes = map[string]bool{
@@ -635,6 +637,8 @@ func TestEnsureSchemaScrubsProjectIdentityGitRemoteCredentials(t *testing.T) {
 		"source_worktree_project_mapping_scopes":          true,
 		"recall_entries":                                  true,
 		"recall_evidence":                                 true,
+		"recall_extract_generations":                      true,
+		"recall_extract_progress":                         true,
 		"cursor_usage_events":                             true,
 	}
 	state.existingIndexes = map[string]bool{
@@ -962,9 +966,11 @@ func TestSyncEnsureSchemaRunsDDLWhenRecallTableMissing(t *testing.T) {
 		"source_worktree_project_mapping_scopes":          true,
 		"recall_entries":                                  true,
 		"recall_evidence":                                 true,
+		"recall_extract_generations":                      true,
+		"recall_extract_progress":                         true,
 		"cursor_usage_events":                             true,
 	}
-	for _, missing := range []string{"recall_entries", "recall_evidence"} {
+	for _, missing := range []string{"recall_entries", "recall_evidence", "recall_extract_generations", "recall_extract_progress"} {
 		t.Run(missing, func(t *testing.T) {
 			pg, state := newSchemaProbeDB(t, map[string][]string{
 				"sessions": {

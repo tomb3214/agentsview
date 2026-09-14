@@ -158,6 +158,8 @@ func TestExtractSchedulerDroppedBackstopRetriesOnDebouncedPass(t *testing.T) {
 func TestExtractSchedulerStopTerminatesRun(t *testing.T) {
 	mgr := &fakePassManager{}
 	s := newExtractScheduler(mgr, time.Hour, 0, 0, nil)
+	closed := false
+	s.closeStore = func() { closed = true }
 	go s.Run(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -166,6 +168,7 @@ func TestExtractSchedulerStopTerminatesRun(t *testing.T) {
 	}()
 	select {
 	case <-done:
+		assert.True(t, closed, "source connections close before Stop returns")
 	case <-time.After(2 * time.Second):
 		t.Fatal("Stop did not terminate Run")
 	}

@@ -94,12 +94,24 @@ func (s *RecallExtractStore) EnsureExtractGeneration(ctx context.Context, gen db
 	if gen.ParamsJSON == "" {
 		gen.ParamsJSON = "{}"
 	}
-	_, err := s.pg.ExecContext(ctx, `INSERT INTO recall_extract_generations
-		(machine, fingerprint, state, model, segmenter, params_json)
-		VALUES ($1, $2, 'building', $3, $4, $5)
-		ON CONFLICT (machine, fingerprint) DO NOTHING`,
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return db.ExtractGeneration{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, `INSERT INTO recall_extract_generations
+		(machine, fingerprint, state, model, segmenter, params_json,coordinated)
+		VALUES ($1, $2, 'building', $3, $4, $5,TRUE)
+		ON CONFLICT (machine, fingerprint) DO UPDATE SET coordinated=TRUE`,
 		s.machine, gen.Fingerprint, gen.Model, gen.Segmenter, gen.ParamsJSON)
 	if err != nil {
+		return db.ExtractGeneration{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE recall_entries SET publication_owner='central'
+		WHERE machine=$1 AND review_state='unreviewed_auto' AND publication_owner<>'central'`, s.machine); err != nil {
+		return db.ExtractGeneration{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return db.ExtractGeneration{}, err
 	}
 	return scanExtractGeneration(s.pg.QueryRowContext(ctx,
@@ -474,6 +486,11 @@ func (s *RecallExtractStore) CommitExtractedUnit(ctx context.Context, u db.Extra
 	}
 	if err := insertPGRecallPublication(ctx, tx, s.machine, entries); err != nil {
 		return 0, err
+	}
+	for _, entry := range entries {
+		if _, err := tx.ExecContext(ctx, `UPDATE recall_entries SET publication_owner='central' WHERE machine=$1 AND id=$2`, s.machine, entry.ID); err != nil {
+			return 0, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err

@@ -6,8 +6,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json/v2"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -178,6 +180,10 @@ func TestPGRecallExtractionMetadataRefreshAndRetraction(t *testing.T) {
 	assert.Equal(t, 2, repaired)
 	_, err = pg.Exec(`UPDATE sessions SET is_automated=TRUE,updated_at=now()-interval '3 hours' WHERE id='source'`)
 	require.NoError(t, err)
+	reader := &Store{pg: pg}
+	page, err := reader.QueryRecallEntries(ctx, db.RecallQuery{Text: "storage", Machine: "device", Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, page.RecallEntries, "source exclusion applies before the next extraction pass")
 	_, err = manager.RunPass(ctx, extract.PassOptions{})
 	require.NoError(t, err)
 	stats, err := store.ExtractProgressStats(ctx, manager.Fingerprint())
@@ -209,4 +215,183 @@ func TestPGRecallExtractionEvidenceMatchesSQLite(t *testing.T) {
 	actual, err := pgExtractEvidence(ctx, tx, "source", 0, 1)
 	require.NoError(t, err)
 	assert.Equal(t, expected, actual)
+}
+
+func TestPGRecallExtractionPublicationHandoverPreservesAcceptedWork(t *testing.T) {
+	store, pg := recallExtractFixture(t, "agentsview_recall_handover_test")
+	ctx := context.Background()
+	local := testDB(t)
+	ended := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	require.NoError(t, local.UpsertSession(db.Session{ID: "source", Machine: "device", Project: "project", Agent: "codex", EndedAt: &ended, MessageCount: 2}))
+	require.NoError(t, local.InsertMessages([]db.Message{
+		{SessionID: "source", Ordinal: 0, Role: "user", Content: "Choose a storage format", SourceUUID: "user-uuid"},
+		{SessionID: "source", Ordinal: 1, Role: "assistant", Content: "Use the established format", SourceUUID: "assistant-uuid"},
+	}))
+	var calls atomic.Int32
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 2 {
+			http.Error(w, "interrupted before next unit", http.StatusServiceUnavailable)
+			return
+		}
+		pgRecallResponse(w)
+	}))
+	t.Cleanup(endpoint.Close)
+	localManager := pgRecallManager(t, local, endpoint.URL)
+	_, _ = localManager.RunPass(ctx, extract.PassOptions{Full: true})
+	localProgress, found, err := local.ExtractProgress(ctx, "source", localManager.Fingerprint())
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, 1, localProgress.UnitCursor)
+	snapshot, err := local.RecallPublicationSnapshot(ctx, nil, nil)
+	require.NoError(t, err)
+	require.Len(t, snapshot.Entries, 1)
+	acceptedID := snapshot.Entries[0].ID
+	syncer := &Sync{pg: pg, local: local, machine: "device", databaseGeneration: "handover"}
+	require.NoError(t, syncer.PushRecall(ctx, false))
+	mirrored, found, err := store.ExtractProgress(ctx, "source", localManager.Fingerprint())
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, localProgress.UnitCursor, mirrored.UnitCursor)
+	assert.Equal(t, localProgress.ContentDigest, mirrored.ContentDigest)
+	centralManager := pgRecallManager(t, store, endpoint.URL)
+	assert.Equal(t, localManager.Fingerprint(), centralManager.Fingerprint())
+	result, err := centralManager.RunPass(ctx, extract.PassOptions{Full: true})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Units)
+	assert.True(t, result.Activated)
+	assert.Equal(t, int32(3), calls.Load(), "the accepted local unit must not be sent to the model again")
+	// An old automatic snapshot from an upgraded publisher cannot roll back
+	// the central cursor, drop the next unit, or restore its archived status.
+	require.NoError(t, syncer.PushRecall(ctx, true))
+	stats, err := store.ExtractProgressStats(ctx, centralManager.Fingerprint())
+	require.NoError(t, err)
+	assert.Equal(t, 2, stats.UnitsDone)
+	assert.Equal(t, 2, stats.Entries)
+	var accepted int
+	require.NoError(t, pg.QueryRow(`SELECT count(*) FROM recall_entries WHERE status='accepted' AND publication_owner='central'`).Scan(&accepted))
+	assert.Equal(t, 2, accepted)
+	// Human edits retain their normal local publication path even when the
+	// same entry was originally claimed by central extraction.
+	localSQL, err := sql.Open("sqlite3", local.Path()+"?_foreign_keys=on")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, localSQL.Close()) })
+	_, err = localSQL.Exec(`UPDATE recall_entries SET review_state='human_reviewed',status='accepted',
+		title='Human-reviewed storage choice' WHERE id=?`, acceptedID)
+	require.NoError(t, err)
+	require.NoError(t, syncer.PushRecall(ctx, false))
+	var title, owner string
+	require.NoError(t, pg.QueryRow(`SELECT title,publication_owner FROM recall_entries WHERE id=$1`, acceptedID).Scan(&title, &owner))
+	assert.Equal(t, "Human-reviewed storage choice", title)
+	assert.Equal(t, "local", owner)
+	_, err = localSQL.Exec(`DELETE FROM recall_entries WHERE id=?`, acceptedID)
+	require.NoError(t, err)
+	require.NoError(t, syncer.PushRecall(ctx, false))
+	var remaining int
+	require.NoError(t, pg.QueryRow(`SELECT count(*) FROM recall_entries WHERE machine='device'`).Scan(&remaining))
+	assert.Equal(t, 1, remaining, "local human deletion preserves the independently accepted central unit")
+}
+
+func TestPGRecallExtractionPublishesZeroEntryCheckpoints(t *testing.T) {
+	store, pg := recallExtractFixture(t, "agentsview_recall_zero_test")
+	ctx := context.Background()
+	local := testDB(t)
+	ended := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	require.NoError(t, local.UpsertSession(db.Session{ID: "source", Machine: "device", Project: "project", Agent: "codex", EndedAt: &ended, MessageCount: 2}))
+	require.NoError(t, local.InsertMessages([]db.Message{
+		{SessionID: "source", Ordinal: 0, Role: "user", Content: "Choose a storage format", SourceUUID: "user-uuid"},
+		{SessionID: "source", Ordinal: 1, Role: "assistant", Content: "Use the established format", SourceUUID: "assistant-uuid"},
+	}))
+	syncer := &Sync{pg: pg, local: local, machine: "device", databaseGeneration: "zero-entry"}
+	require.NoError(t, syncer.PushRecall(ctx, false))
+	before, err := local.RecallPublicationSnapshot(ctx, nil, nil)
+	require.NoError(t, err)
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.MarshalWrite(w, map[string]any{"choices": []any{map[string]any{
+			"finish_reason": "stop", "message": map[string]string{"role": "assistant", "content": `{"entries":[]}`},
+		}}})
+	}))
+	t.Cleanup(endpoint.Close)
+	manager := pgRecallManager(t, local, endpoint.URL)
+	_, err = manager.RunPass(ctx, extract.PassOptions{Full: true})
+	require.NoError(t, err)
+	after, err := local.RecallPublicationSnapshot(ctx, nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, before.Revision, after.Revision, "no entry changes should invalidate query cursors")
+	assert.NotEqual(t, before.ExtractionRevision, after.ExtractionRevision)
+	require.NoError(t, syncer.PushRecall(ctx, false))
+	progress, found, err := store.ExtractProgress(ctx, "source", manager.Fingerprint())
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, 2, progress.UnitCursor)
+	assert.Equal(t, "done", progress.State)
+}
+
+func TestPGRecallExtractionGroupSharesEightWorkerLimit(t *testing.T) {
+	store, pg := recallExtractFixture(t, "agentsview_recall_group_test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	other, err := NewRecallExtractStore(pg, "other-device")
+	require.NoError(t, err)
+	group, err := NewRecallExtractGroup(store, other)
+	require.NoError(t, err)
+	for _, machine := range []string{"device", "other-device"} {
+		for i := 0; i < 5; i++ {
+			id := fmt.Sprintf("%s-%d", machine, i)
+			_, err := pg.Exec(`INSERT INTO sessions(id,machine,project,agent,ended_at,message_count)
+				VALUES($1,$2,'project','codex',now()-interval '1 hour',2)`, id, machine)
+			require.NoError(t, err)
+			_, err = pg.Exec(`INSERT INTO messages(session_id,ordinal,role,content,source_uuid)
+				VALUES($1,0,'user','Choose a storage format','user'),($1,1,'assistant','Use the established format','assistant')`, id)
+			require.NoError(t, err)
+		}
+	}
+	ready, release := make(chan struct{}), make(chan struct{})
+	var readyOnce, releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	var active, peak, calls atomic.Int32
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		n := active.Add(1)
+		defer active.Add(-1)
+		for old := peak.Load(); n > old; old = peak.Load() {
+			if peak.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		if n == 8 {
+			readyOnce.Do(func() { close(ready) })
+		}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return
+		}
+		pgRecallResponse(w)
+	}))
+	t.Cleanup(endpoint.Close)
+	manager := pgRecallManager(t, group, endpoint.URL)
+	done := make(chan error, 1)
+	go func() { _, err := manager.RunPass(ctx, extract.PassOptions{Full: true}); done <- err }()
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("pass ended before eight workers: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("eight workers did not start")
+	}
+	releaseOnce.Do(func() { close(release) })
+	require.NoError(t, <-done)
+	assert.Equal(t, int32(8), peak.Load())
+	assert.Equal(t, int32(24), calls.Load())
+	stats, err := group.ExtractProgressStats(ctx, manager.Fingerprint())
+	require.NoError(t, err)
+	assert.Equal(t, 12, stats.Done)
+	assert.Equal(t, 24, stats.UnitsDone)
+	assert.Equal(t, 24, stats.Entries)
+	for _, source := range []*RecallExtractStore{store, other} {
+		generations, err := source.ExtractGenerations(ctx)
+		require.NoError(t, err)
+		require.Len(t, generations, 1)
+		assert.Equal(t, db.ExtractGenerationActive, generations[0].State)
+	}
 }

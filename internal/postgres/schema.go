@@ -338,6 +338,7 @@ CREATE INDEX IF NOT EXISTS idx_pinned_source_uuid
 -- and vector state remain local; this remote corpus is read-only at serve time.
 CREATE TABLE IF NOT EXISTS recall_entries (
     id                  TEXT PRIMARY KEY,
+    publication_owner   TEXT NOT NULL DEFAULT 'local' CHECK (publication_owner IN ('local','central')),
     machine             TEXT NOT NULL,
     type                TEXT NOT NULL,
     scope               TEXT NOT NULL,
@@ -400,6 +401,7 @@ CREATE INDEX IF NOT EXISTS idx_recall_evidence_session
 
 CREATE TABLE IF NOT EXISTS recall_extract_generations (
     machine TEXT NOT NULL,
+    coordinated BOOLEAN NOT NULL DEFAULT FALSE,
     fingerprint TEXT NOT NULL,
     state TEXT NOT NULL CHECK (state IN ('building', 'active', 'retired')),
     model TEXT NOT NULL,
@@ -1025,6 +1027,16 @@ func EnsureSchema(
 
 	// Idempotent column additions for forward compatibility.
 	alters := []columnMigration{
+		{
+			"recall_entries", "publication_owner",
+			`publication_owner TEXT NOT NULL DEFAULT 'local' CHECK (publication_owner IN ('local','central'))`,
+			"adding recall_entries.publication_owner",
+		},
+		{
+			"recall_extract_generations", "coordinated",
+			`coordinated BOOLEAN NOT NULL DEFAULT FALSE`,
+			"adding recall_extract_generations.coordinated",
+		},
 		{
 			"sessions", "transcript_revision",
 			`transcript_revision TEXT NOT NULL DEFAULT '0'`,
@@ -2752,7 +2764,17 @@ func CheckSchemaCompat(
 // serve-read sessions.source_archive_id/file_path provenance columns itself)
 // and are checked only on the push fast path.
 func checkPushSchemaCompat(ctx context.Context, db *sql.DB) error {
-	rows, err := db.QueryContext(ctx,
+	rows, err := db.QueryContext(ctx, `SELECT publication_owner FROM recall_entries LIMIT 0`)
+	if err != nil {
+		return fmt.Errorf("recall_entries table missing publication ownership: %w", err)
+	}
+	rows.Close()
+	rows, err = db.QueryContext(ctx, `SELECT coordinated FROM recall_extract_generations LIMIT 0`)
+	if err != nil {
+		return fmt.Errorf("recall_extract_generations table missing coordination state: %w", err)
+	}
+	rows.Close()
+	rows, err = db.QueryContext(ctx,
 		`SELECT key, value FROM sync_metadata LIMIT 0`)
 	if err != nil {
 		return fmt.Errorf(
@@ -2797,6 +2819,8 @@ func pushSchemaCurrent(ctx context.Context, db *sql.DB) bool {
 		!pgHasTable(ctx, db, "source_worktree_project_mapping_scopes") ||
 		!pgHasTable(ctx, db, "recall_entries") ||
 		!pgHasTable(ctx, db, "recall_evidence") ||
+		!pgHasTable(ctx, db, "recall_extract_generations") ||
+		!pgHasTable(ctx, db, "recall_extract_progress") ||
 		!pgHasTable(ctx, db, "cursor_usage_events") {
 		return false
 	}
