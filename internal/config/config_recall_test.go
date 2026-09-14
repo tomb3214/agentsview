@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -377,6 +378,9 @@ func TestRecallExtractConfigDefaults(t *testing.T) {
 }
 
 func TestRecallExtractConfigTOMLLoad(t *testing.T) {
+	urlDir := t.TempDir()
+	urlA := filepath.Join(urlDir, "device-a.url")
+	urlB := filepath.Join(urlDir, "device-b.url")
 	cfg := loadMinimalWithConfig(t, map[string]any{
 		"recall": map[string]any{
 			"extract": map[string]any{
@@ -387,8 +391,8 @@ func TestRecallExtractConfigTOMLLoad(t *testing.T) {
 				"server":      "local",
 				"max_tokens":  8192,
 				"postgres_sources": []map[string]any{
-					{"machine": "device-a", "url_file": "/etc/agentsview/device-a.url", "schema": "archive", "allow_insecure": true},
-					{"machine": "device-b", "url_file": "/etc/agentsview/device-b.url"},
+					{"machine": "device-a", "url_file": urlA, "schema": "archive", "allow_insecure": true},
+					{"machine": "device-b", "url_file": urlB},
 				},
 				"servers": map[string]any{
 					"local": map[string]any{
@@ -420,7 +424,7 @@ func TestRecallExtractConfigTOMLLoad(t *testing.T) {
 	require.True(t, extract.Enabled)
 	assert.Equal(t, 8, extract.Concurrency, "configured workers survive file loading")
 	require.Len(t, extract.PostgresSources, 2)
-	assert.Equal(t, RecallExtractPostgresSource{Machine: "device-a", URLFile: "/etc/agentsview/device-a.url", Schema: "archive", AllowInsecure: true}, extract.PostgresSources[0])
+	assert.Equal(t, RecallExtractPostgresSource{Machine: "device-a", URLFile: urlA, Schema: "archive", AllowInsecure: true}, extract.PostgresSources[0])
 	assert.Equal(t, "device-b", extract.PostgresSources[1].Machine)
 	assert.Equal(t, "qwen3.5-27b", extract.Model)
 	assert.Equal(t, "gpu-a", extract.Deployment)
