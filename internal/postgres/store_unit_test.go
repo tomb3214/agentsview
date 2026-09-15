@@ -124,10 +124,10 @@ func TestPGMessagesBranchFTSRequiresAllTerms(t *testing.T) {
 	)
 
 	assert.Contains(t, branch,
-		"m.content ILIKE '%'||$1||'%' ESCAPE E'\\\\'")
+		"m.content ILIKE $1 ESCAPE E'\\\\'")
 	assert.Contains(t, branch,
-		"m.content ILIKE '%'||$2||'%' ESCAPE E'\\\\'")
-	assert.Equal(t, []any{"quick", "fox"}, pb.args)
+		"m.content ILIKE $2 ESCAPE E'\\\\'")
+	assert.Equal(t, []any{"%quick%", "%fox%"}, pb.args)
 }
 
 func TestPGSubstringSnippetFTSModeCentersOnFirstTerm(t *testing.T) {
