@@ -135,7 +135,7 @@ func (s *Store) searchContentSubstringPG(
 
 	limitP := pb.add(f.Limit + 1)
 	offsetP := pb.add(f.Cursor)
-	query := "WITH scoped AS (SELECT id FROM sessions WHERE " + scopeWhere + ") " +
+	query := "WITH scoped AS (SELECT id, project, agent, ended_at, started_at, created_at FROM sessions WHERE " + scopeWhere + ") " +
 		"SELECT session_id, project, agent, location, role, tool_name, " +
 		"ordinal, ts, snippet FROM (" +
 		strings.Join(branches, " UNION ALL ") +
@@ -163,13 +163,12 @@ func pgMessagesBranch(
 
 	// Select the full content; the snippet is windowed and redacted in Go.
 	return fmt.Sprintf(`
-		SELECT m.session_id, s.project, s.agent, 'message' AS location,
+		SELECT m.session_id, sc.project, sc.agent, 'message' AS location,
 			m.role AS role, '' AS tool_name, m.ordinal,
 			m.timestamp AS ts,
 			m.content AS snippet, 0 AS src, 0::bigint AS row_id,
-			COALESCE(s.ended_at, s.started_at, s.created_at) AS sort_ts
+			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
 		FROM messages m
-		JOIN sessions s ON s.id = m.session_id
 		JOIN scoped sc ON sc.id = m.session_id
 		WHERE %s
 		  AND %s`,
@@ -184,7 +183,7 @@ func pgContentSearchPredicate(
 		ilikePat := "%" + escapedPat + "%"
 		ilikeParam := pb.add(ilikePat)
 		return fmt.Sprintf(
-			"%s ILIKE '%%'||%s||'%%' ESCAPE E'\\\\'",
+			"%s ILIKE %s ESCAPE E'\\\\'",
 			column, ilikeParam,
 		)
 	}
@@ -195,9 +194,9 @@ func pgContentSearchPredicate(
 		if term == "" {
 			continue
 		}
-		termParam := pb.add(escapeLike(term))
+		termParam := pb.add("%" + escapeLike(term) + "%")
 		clauses = append(clauses, fmt.Sprintf(
-			"%s ILIKE '%%'||%s||'%%' ESCAPE E'\\\\'",
+			"%s ILIKE %s ESCAPE E'\\\\'",
 			column, termParam,
 		))
 	}
@@ -215,17 +214,16 @@ func pgToolInputBranch(
 	ilikeParam := pb.add(ilikePat)
 
 	return fmt.Sprintf(`
-		SELECT tc.session_id, s.project, s.agent, 'tool_input' AS location,
+		SELECT tc.session_id, sc.project, sc.agent, 'tool_input' AS location,
 			'assistant' AS role, tc.tool_name, tc.message_ordinal AS ordinal,
 			m.timestamp AS ts,
 			tc.input_json AS snippet, 1 AS src, tc.id AS row_id,
-			COALESCE(s.ended_at, s.started_at, s.created_at) AS sort_ts
+			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
 		FROM tool_calls tc
-		JOIN sessions s ON s.id = tc.session_id
 		JOIN scoped sc ON sc.id = tc.session_id
 		JOIN messages m ON m.session_id = tc.session_id
 			AND m.ordinal = tc.message_ordinal
-		WHERE tc.input_json ILIKE '%%'||%s||'%%' ESCAPE E'\\'`,
+		WHERE tc.input_json ILIKE %s ESCAPE E'\\'`,
 		ilikeParam)
 }
 
@@ -240,17 +238,16 @@ func pgToolResultContentBranch(
 	ilikeParam := pb.add(ilikePat)
 
 	return fmt.Sprintf(`
-		SELECT tc.session_id, s.project, s.agent, 'tool_result' AS location,
+		SELECT tc.session_id, sc.project, sc.agent, 'tool_result' AS location,
 			'assistant' AS role, tc.tool_name, tc.message_ordinal AS ordinal,
 			m.timestamp AS ts,
 			tc.result_content AS snippet, 2 AS src, tc.id AS row_id,
-			COALESCE(s.ended_at, s.started_at, s.created_at) AS sort_ts
+			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
 		FROM tool_calls tc
-		JOIN sessions s ON s.id = tc.session_id
 		JOIN scoped sc ON sc.id = tc.session_id
 		JOIN messages m ON m.session_id = tc.session_id
 			AND m.ordinal = tc.message_ordinal
-		WHERE tc.result_content ILIKE '%%'||%s||'%%' ESCAPE E'\\'
+		WHERE tc.result_content ILIKE %s ESCAPE E'\\'
 		  AND NOT EXISTS (
 			SELECT 1 FROM tool_result_events tre
 			WHERE tre.session_id = tc.session_id
@@ -268,16 +265,15 @@ func pgToolResultEventsBranch(
 	ilikeParam := pb.add(ilikePat)
 
 	return fmt.Sprintf(`
-		SELECT tre.session_id, s.project, s.agent, 'tool_result' AS location,
+		SELECT tre.session_id, sc.project, sc.agent, 'tool_result' AS location,
 			'assistant' AS role, '' AS tool_name,
 			tre.tool_call_message_ordinal AS ordinal,
 			tre.timestamp AS ts,
 			tre.content AS snippet, 3 AS src, tre.id AS row_id,
-			COALESCE(s.ended_at, s.started_at, s.created_at) AS sort_ts
+			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
 		FROM tool_result_events tre
-		JOIN sessions s ON s.id = tre.session_id
 		JOIN scoped sc ON sc.id = tre.session_id
-		WHERE tre.content ILIKE '%%'||%s||'%%' ESCAPE E'\\'`,
+		WHERE tre.content ILIKE %s ESCAPE E'\\'`,
 		ilikeParam)
 }
 
@@ -435,7 +431,7 @@ func (s *Store) pgRegexCandidateRows(
 		return s.pg.QueryContext(ctx, q)
 	}
 
-	query := "WITH scoped AS (SELECT id FROM sessions WHERE " + scopeWhere + ") " +
+	query := "WITH scoped AS (SELECT id, project, agent, ended_at, started_at, created_at FROM sessions WHERE " + scopeWhere + ") " +
 		"SELECT session_id, project, agent, location, role, tool_name, " +
 		"ordinal, ts, body FROM (" +
 		strings.Join(branches, " UNION ALL ") +
@@ -451,7 +447,7 @@ func pgPrefilterClause(col, lit string, pb *paramBuilder) string {
 	}
 	escaped := escapeLike(lit)
 	p := pb.add("%" + escaped + "%")
-	return fmt.Sprintf("%s ILIKE '%%'||%s||'%%' ESCAPE E'\\\\'", col, p)
+	return fmt.Sprintf("%s ILIKE %s ESCAPE E'\\\\'", col, p)
 }
 
 // pgMessagesCandidateBranch: candidate rows for regex from messages.
@@ -467,13 +463,12 @@ func pgMessagesCandidateBranch(
 	}
 
 	return fmt.Sprintf(`
-		SELECT m.session_id, s.project, s.agent, 'message' AS location,
+		SELECT m.session_id, sc.project, sc.agent, 'message' AS location,
 			m.role AS role, '' AS tool_name, m.ordinal,
 			m.timestamp AS ts,
 			m.content AS body, 0 AS src, 0::bigint AS row_id,
-			COALESCE(s.ended_at, s.started_at, s.created_at) AS sort_ts
+			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
 		FROM messages m
-		JOIN sessions s ON s.id = m.session_id
 		JOIN scoped sc ON sc.id = m.session_id
 		WHERE %s AND %s`,
 		prefilter, sysPred)
@@ -486,13 +481,12 @@ func pgToolInputCandidateBranch(
 	prefilter := pgPrefilterClause("tc.input_json", lit, pb)
 
 	return fmt.Sprintf(`
-		SELECT tc.session_id, s.project, s.agent, 'tool_input' AS location,
+		SELECT tc.session_id, sc.project, sc.agent, 'tool_input' AS location,
 			'assistant' AS role, tc.tool_name, tc.message_ordinal AS ordinal,
 			m.timestamp AS ts,
 			tc.input_json AS body, 1 AS src, tc.id AS row_id,
-			COALESCE(s.ended_at, s.started_at, s.created_at) AS sort_ts
+			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
 		FROM tool_calls tc
-		JOIN sessions s ON s.id = tc.session_id
 		JOIN scoped sc ON sc.id = tc.session_id
 		JOIN messages m ON m.session_id = tc.session_id
 			AND m.ordinal = tc.message_ordinal
@@ -507,13 +501,12 @@ func pgToolResultContentCandidateBranch(
 	prefilter := pgPrefilterClause("tc.result_content", lit, pb)
 
 	return fmt.Sprintf(`
-		SELECT tc.session_id, s.project, s.agent, 'tool_result' AS location,
+		SELECT tc.session_id, sc.project, sc.agent, 'tool_result' AS location,
 			'assistant' AS role, tc.tool_name, tc.message_ordinal AS ordinal,
 			m.timestamp AS ts,
 			tc.result_content AS body, 2 AS src, tc.id AS row_id,
-			COALESCE(s.ended_at, s.started_at, s.created_at) AS sort_ts
+			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
 		FROM tool_calls tc
-		JOIN sessions s ON s.id = tc.session_id
 		JOIN scoped sc ON sc.id = tc.session_id
 		JOIN messages m ON m.session_id = tc.session_id
 			AND m.ordinal = tc.message_ordinal
@@ -534,14 +527,13 @@ func pgToolResultEventsCandidateBranch(
 	prefilter := pgPrefilterClause("tre.content", lit, pb)
 
 	return fmt.Sprintf(`
-		SELECT tre.session_id, s.project, s.agent, 'tool_result' AS location,
+		SELECT tre.session_id, sc.project, sc.agent, 'tool_result' AS location,
 			'assistant' AS role, '' AS tool_name,
 			tre.tool_call_message_ordinal AS ordinal,
 			tre.timestamp AS ts,
 			tre.content AS body, 3 AS src, tre.id AS row_id,
-			COALESCE(s.ended_at, s.started_at, s.created_at) AS sort_ts
+			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
 		FROM tool_result_events tre
-		JOIN sessions s ON s.id = tre.session_id
 		JOIN scoped sc ON sc.id = tre.session_id
 		WHERE %s`,
 		prefilter)
