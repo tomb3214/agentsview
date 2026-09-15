@@ -142,7 +142,8 @@ func (s *Store) searchContentSubstringPG(
 		") sub ORDER BY sort_ts DESC NULLS LAST, session_id ASC, ordinal ASC, src ASC, row_id ASC " +
 		"LIMIT " + limitP + " OFFSET " + offsetP
 
-	return s.scanPGContentMatches(ctx, query, pb.args, f.Limit, f.Cursor,
+	isScoped := len(scopeArgs) > 0
+	return s.scanPGContentMatches(ctx, query, pb.args, f.Limit, f.Cursor, isScoped,
 		func(body string) string { return pgSubstringSnippet(f, body) })
 }
 
@@ -168,8 +169,8 @@ func pgMessagesBranch(
 			m.timestamp AS ts,
 			m.content AS snippet, 0 AS src, 0::bigint AS row_id,
 			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
-		FROM messages m
-		JOIN scoped sc ON sc.id = m.session_id
+		FROM scoped sc
+		JOIN messages m ON m.session_id = sc.id
 		WHERE %s
 		  AND %s`,
 		contentPred, sysPred)
@@ -219,8 +220,8 @@ func pgToolInputBranch(
 			m.timestamp AS ts,
 			tc.input_json AS snippet, 1 AS src, tc.id AS row_id,
 			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
-		FROM tool_calls tc
-		JOIN scoped sc ON sc.id = tc.session_id
+		FROM scoped sc
+		JOIN tool_calls tc ON tc.session_id = sc.id
 		JOIN messages m ON m.session_id = tc.session_id
 			AND m.ordinal = tc.message_ordinal
 		WHERE tc.input_json ILIKE %s ESCAPE E'\\'`,
@@ -243,8 +244,8 @@ func pgToolResultContentBranch(
 			m.timestamp AS ts,
 			tc.result_content AS snippet, 2 AS src, tc.id AS row_id,
 			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
-		FROM tool_calls tc
-		JOIN scoped sc ON sc.id = tc.session_id
+		FROM scoped sc
+		JOIN tool_calls tc ON tc.session_id = sc.id
 		JOIN messages m ON m.session_id = tc.session_id
 			AND m.ordinal = tc.message_ordinal
 		WHERE tc.result_content ILIKE %s ESCAPE E'\\'
@@ -271,8 +272,8 @@ func pgToolResultEventsBranch(
 			tre.timestamp AS ts,
 			tre.content AS snippet, 3 AS src, tre.id AS row_id,
 			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
-		FROM tool_result_events tre
-		JOIN scoped sc ON sc.id = tre.session_id
+		FROM scoped sc
+		JOIN tool_result_events tre ON tre.session_id = sc.id
 		WHERE tre.content ILIKE %s ESCAPE E'\\'`,
 		ilikeParam)
 }
@@ -284,9 +285,31 @@ func pgToolResultEventsBranch(
 // deriveLexicalUnitsPG pass (post-truncation, O(page)).
 func (s *Store) scanPGContentMatches(
 	ctx context.Context, query string, args []any, limit, cursor int,
+	isScoped bool,
 	makeSnippet func(body string) string,
 ) (db.ContentSearchPage, error) {
-	rows, err := s.pg.QueryContext(ctx, query, args...)
+	var (
+		rows *sql.Rows
+		tx   *sql.Tx
+		err  error
+	)
+	if isScoped {
+		tx, err = s.pg.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		if err != nil {
+			return db.ContentSearchPage{}, fmt.Errorf("pg content search begin tx: %w", err)
+		}
+		defer func() {
+			if tx != nil {
+				_ = tx.Rollback()
+			}
+		}()
+		if _, err = tx.ExecContext(ctx, "SET LOCAL enable_bitmapscan = off"); err != nil {
+			return db.ContentSearchPage{}, fmt.Errorf("pg content search set local: %w", err)
+		}
+		rows, err = tx.QueryContext(ctx, query, args...)
+	} else {
+		rows, err = s.pg.QueryContext(ctx, query, args...)
+	}
 	if err != nil {
 		return db.ContentSearchPage{}, fmt.Errorf("pg content search: %w", err)
 	}
@@ -320,6 +343,10 @@ func (s *Store) scanPGContentMatches(
 	if err := rows.Close(); err != nil {
 		return db.ContentSearchPage{}, fmt.Errorf("closing pg content matches: %w", err)
 	}
+	if tx != nil {
+		_ = tx.Rollback()
+		tx = nil
+	}
 	page := db.ContentSearchPage{Matches: out}
 	if len(out) > limit {
 		page.Matches = out[:limit]
@@ -342,11 +369,18 @@ func (s *Store) searchContentRegexPG(
 	}
 	lit := literalPrefixPG(f.Pattern)
 
-	rows, err := s.pgRegexCandidateRows(ctx, f, lit)
+	rows, tx, err := s.pgRegexCandidateRows(ctx, f, lit)
 	if err != nil {
 		return db.ContentSearchPage{}, err
 	}
 	defer rows.Close()
+	if tx != nil {
+		defer func() {
+			if tx != nil {
+				_ = tx.Rollback()
+			}
+		}()
+	}
 
 	out := make([]db.ContentMatch, 0)
 	seen := 0
@@ -389,6 +423,10 @@ func (s *Store) searchContentRegexPG(
 	if err := rows.Close(); err != nil {
 		return db.ContentSearchPage{}, fmt.Errorf("closing pg regex candidates: %w", err)
 	}
+	if tx != nil {
+		_ = tx.Rollback()
+		tx = nil
+	}
 	page := db.ContentSearchPage{Matches: out}
 	if len(out) > f.Limit {
 		page.Matches = out[:f.Limit]
@@ -403,7 +441,7 @@ func (s *Store) searchContentRegexPG(
 // pgRegexCandidateRows fetches full-body rows for regex pre-filtering.
 func (s *Store) pgRegexCandidateRows(
 	ctx context.Context, f db.ContentSearchFilter, lit string,
-) (*sql.Rows, error) {
+) (*sql.Rows, *sql.Tx, error) {
 	scopeWhere, scopeArgs := buildPGSessionFilter(pgSessionFilter(f))
 
 	pb := &paramBuilder{
@@ -428,7 +466,8 @@ func (s *Store) pgRegexCandidateRows(
 		q := "SELECT '' AS session_id, '' AS project, '' AS agent, " +
 			"'' AS location, '' AS role, '' AS tool_name, 0 AS ordinal, " +
 			"'' AS ts, '' AS body WHERE FALSE"
-		return s.pg.QueryContext(ctx, q)
+		rows, err := s.pg.QueryContext(ctx, q)
+		return rows, nil, err
 	}
 
 	query := "WITH scoped AS (SELECT id, project, agent, ended_at, started_at, created_at FROM sessions WHERE " + scopeWhere + ") " +
@@ -436,7 +475,26 @@ func (s *Store) pgRegexCandidateRows(
 		"ordinal, ts, body FROM (" +
 		strings.Join(branches, " UNION ALL ") +
 		") sub ORDER BY sort_ts DESC NULLS LAST, session_id ASC, ordinal ASC, src ASC, row_id ASC"
-	return s.pg.QueryContext(ctx, query, pb.args...)
+
+	isScoped := len(scopeArgs) > 0
+	if isScoped {
+		tx, err := s.pg.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		if err != nil {
+			return nil, nil, fmt.Errorf("pg regex candidate begin tx: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_bitmapscan = off"); err != nil {
+			_ = tx.Rollback()
+			return nil, nil, fmt.Errorf("pg regex candidate set local: %w", err)
+		}
+		rows, err := tx.QueryContext(ctx, query, pb.args...)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, nil, err
+		}
+		return rows, tx, nil
+	}
+	rows, err := s.pg.QueryContext(ctx, query, pb.args...)
+	return rows, nil, err
 }
 
 // pgPrefilterClause returns an ILIKE clause for lit, or IS NOT NULL when lit
@@ -468,8 +526,8 @@ func pgMessagesCandidateBranch(
 			m.timestamp AS ts,
 			m.content AS body, 0 AS src, 0::bigint AS row_id,
 			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
-		FROM messages m
-		JOIN scoped sc ON sc.id = m.session_id
+		FROM scoped sc
+		JOIN messages m ON m.session_id = sc.id
 		WHERE %s AND %s`,
 		prefilter, sysPred)
 }
@@ -486,8 +544,8 @@ func pgToolInputCandidateBranch(
 			m.timestamp AS ts,
 			tc.input_json AS body, 1 AS src, tc.id AS row_id,
 			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
-		FROM tool_calls tc
-		JOIN scoped sc ON sc.id = tc.session_id
+		FROM scoped sc
+		JOIN tool_calls tc ON tc.session_id = sc.id
 		JOIN messages m ON m.session_id = tc.session_id
 			AND m.ordinal = tc.message_ordinal
 		WHERE %s`,
@@ -506,8 +564,8 @@ func pgToolResultContentCandidateBranch(
 			m.timestamp AS ts,
 			tc.result_content AS body, 2 AS src, tc.id AS row_id,
 			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
-		FROM tool_calls tc
-		JOIN scoped sc ON sc.id = tc.session_id
+		FROM scoped sc
+		JOIN tool_calls tc ON tc.session_id = sc.id
 		JOIN messages m ON m.session_id = tc.session_id
 			AND m.ordinal = tc.message_ordinal
 		WHERE %s
@@ -533,8 +591,8 @@ func pgToolResultEventsCandidateBranch(
 			tre.timestamp AS ts,
 			tre.content AS body, 3 AS src, tre.id AS row_id,
 			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
-		FROM tool_result_events tre
-		JOIN scoped sc ON sc.id = tre.session_id
+		FROM scoped sc
+		JOIN tool_result_events tre ON tre.session_id = sc.id
 		WHERE %s`,
 		prefilter)
 }

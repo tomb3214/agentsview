@@ -112,6 +112,47 @@ func TestEscapeLike(t *testing.T) {
 	}
 }
 
+func TestPGSearchContentBranchJoinOrder(t *testing.T) {
+	pb := &paramBuilder{}
+	f := db.ContentSearchFilter{
+		Pattern: "test",
+		Mode:    "substring",
+	}
+	escaped := escapeLike("test")
+
+	msgBranch := pgMessagesBranch(f, escaped, pb)
+	assert.Contains(t, msgBranch, `FROM scoped sc
+		JOIN messages m ON m.session_id = sc.id`)
+
+	tiBranch := pgToolInputBranch(f, escaped, pb)
+	assert.Contains(t, tiBranch, `FROM scoped sc
+		JOIN tool_calls tc ON tc.session_id = sc.id`)
+
+	trBranch := pgToolResultContentBranch(f, escaped, pb)
+	assert.Contains(t, trBranch, `FROM scoped sc
+		JOIN tool_calls tc ON tc.session_id = sc.id`)
+
+	treBranch := pgToolResultEventsBranch(f, escaped, pb)
+	assert.Contains(t, treBranch, `FROM scoped sc
+		JOIN tool_result_events tre ON tre.session_id = sc.id`)
+
+	msgCand := pgMessagesCandidateBranch(f, "test", pb)
+	assert.Contains(t, msgCand, `FROM scoped sc
+		JOIN messages m ON m.session_id = sc.id`)
+
+	tiCand := pgToolInputCandidateBranch(f, "test", pb)
+	assert.Contains(t, tiCand, `FROM scoped sc
+		JOIN tool_calls tc ON tc.session_id = sc.id`)
+
+	trCand := pgToolResultContentCandidateBranch(f, "test", pb)
+	assert.Contains(t, trCand, `FROM scoped sc
+		JOIN tool_calls tc ON tc.session_id = sc.id`)
+
+	treCand := pgToolResultEventsCandidateBranch(f, "test", pb)
+	assert.Contains(t, treCand, `FROM scoped sc
+		JOIN tool_result_events tre ON tre.session_id = sc.id`)
+}
+
 func TestPGMessagesBranchFTSRequiresAllTerms(t *testing.T) {
 	pb := &paramBuilder{}
 	branch := pgMessagesBranch(
