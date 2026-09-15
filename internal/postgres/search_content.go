@@ -303,7 +303,7 @@ func (s *Store) scanPGContentMatches(
 				_ = tx.Rollback()
 			}
 		}()
-		if _, err = tx.ExecContext(ctx, "SET LOCAL enable_bitmapscan = off"); err != nil {
+		if _, err = tx.ExecContext(ctx, "SET LOCAL enable_bitmapscan = off; SET LOCAL enable_seqscan = off"); err != nil {
 			return db.ContentSearchPage{}, fmt.Errorf("pg content search set local: %w", err)
 		}
 		rows, err = tx.QueryContext(ctx, query, args...)
@@ -482,7 +482,7 @@ func (s *Store) pgRegexCandidateRows(
 		if err != nil {
 			return nil, nil, fmt.Errorf("pg regex candidate begin tx: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_bitmapscan = off"); err != nil {
+		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_bitmapscan = off; SET LOCAL enable_seqscan = off"); err != nil {
 			_ = tx.Rollback()
 			return nil, nil, fmt.Errorf("pg regex candidate set local: %w", err)
 		}
