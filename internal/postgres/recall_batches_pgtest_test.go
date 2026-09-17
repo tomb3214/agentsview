@@ -133,3 +133,37 @@ func TestRecallPublicationBatchParityAndRollback(t *testing.T) {
 	require.NoError(t, syncer.pg.QueryRowContext(ctx, `SELECT count(*) FROM recall_entries WHERE id='other-entry' AND machine='other-device'`).Scan(&otherCount))
 	assert.Equal(t, 1, otherCount, "other device publication remains intact")
 }
+
+func TestRecallPublicationSanitizesTextWithoutChangingArchive(t *testing.T) {
+	_, pg := recallExtractFixture(t, "agentsview_recall_publication_text_test")
+	ctx := context.Background()
+	local := testDB(t)
+	require.NoError(t, local.UpsertSession(db.Session{ID: "source", Machine: "device", Agent: "codex"}))
+	entry := db.RecallEntry{
+		ID: "entry", Type: "fact", Scope: "project", Title: "Storage\x00 format",
+		Body: "Text\x00 with invalid \xff and é", Trigger: "when\x00 needed", Uncertainty: "bounded\x00",
+		SourceSessionID: "source", ProvenanceOK: true,
+		Evidence: []db.RecallEvidence{{SessionID: "source", MessageStartOrdinal: 0,
+			MessageEndOrdinal: 1, Snippet: "quoted\x00 text é"}},
+	}
+	_, err := local.InsertRecallEntry(entry)
+	require.NoError(t, err)
+	syncer, err := New(testPGURL(t), "agentsview_recall_publication_text_test", local, "device", true, SyncOptions{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, syncer.Close()) })
+	require.NoError(t, syncer.PushRecall(ctx, false))
+	var title, body, trigger, uncertainty, snippet string
+	require.NoError(t, pg.QueryRow(`SELECT e.title,e.body,e.trigger,e.uncertainty,ev.snippet
+		FROM recall_entries e JOIN recall_evidence ev ON ev.entry_id=e.id
+		WHERE e.id='entry' AND e.machine='device'`).Scan(&title, &body, &trigger, &uncertainty, &snippet))
+	assert.Equal(t, "Storage format", title)
+	assert.Equal(t, "Text with invalid  and é", body)
+	assert.Equal(t, "when needed", trigger)
+	assert.Equal(t, "bounded", uncertainty)
+	assert.Equal(t, "quoted text é", snippet)
+	original, err := local.GetRecallEntry(ctx, entry.ID)
+	require.NoError(t, err)
+	require.NotNil(t, original)
+	assert.Equal(t, entry.Body, original.Body, "PostgreSQL normalization must not rewrite the archive")
+	assert.Equal(t, entry.Evidence[0].Snippet, original.Evidence[0].Snippet)
+}

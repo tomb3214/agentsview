@@ -156,11 +156,7 @@ func pgMessagesBranch(
 		"m.content", f, escapedPat, pb,
 	)
 
-	sysPred := "TRUE"
-	if f.ExcludeSystem {
-		sysPred = "m.is_system = FALSE AND " +
-			db.PostgresSystemPrefixSQL("m.content", "m.role")
-	}
+	prefixJoin, sysPred := pgContentSystemFilter(f.ExcludeSystem)
 
 	// Select the full content; the snippet is windowed and redacted in Go.
 	return fmt.Sprintf(`
@@ -171,9 +167,23 @@ func pgMessagesBranch(
 			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
 		FROM scoped sc
 		JOIN messages m ON m.session_id = sc.id
+		%s
 		WHERE %s
 		  AND %s`,
-		contentPred, sysPred)
+		prefixJoin, contentPred, sysPred)
+}
+
+// Keep the prefix projection separate so PostgreSQL does not repeatedly trim
+// large bodies for every prefix test before applying the session scope.
+func pgContentSystemFilter(exclude bool) (string, string) {
+	if !exclude {
+		return "", "TRUE"
+	}
+	join := "CROSS JOIN LATERAL (SELECT " + db.SystemPrefixTrimSQL("m.content") +
+		" AS trimmed_content OFFSET 0) prefix"
+	predicate := "m.is_system = FALSE AND " +
+		db.PostgresSystemPrefixSQLFromTrimmed("prefix.trimmed_content", "m.role")
+	return join, predicate
 }
 
 func pgContentSearchPredicate(
@@ -514,11 +524,7 @@ func pgMessagesCandidateBranch(
 ) string {
 	prefilter := pgPrefilterClause("m.content", lit, pb)
 
-	sysPred := "TRUE"
-	if f.ExcludeSystem {
-		sysPred = "m.is_system = FALSE AND " +
-			db.PostgresSystemPrefixSQL("m.content", "m.role")
-	}
+	prefixJoin, sysPred := pgContentSystemFilter(f.ExcludeSystem)
 
 	return fmt.Sprintf(`
 		SELECT m.session_id, sc.project, sc.agent, 'message' AS location,
@@ -528,8 +534,9 @@ func pgMessagesCandidateBranch(
 			COALESCE(sc.ended_at, sc.started_at, sc.created_at) AS sort_ts
 		FROM scoped sc
 		JOIN messages m ON m.session_id = sc.id
+		%s
 		WHERE %s AND %s`,
-		prefilter, sysPred)
+		prefixJoin, prefilter, sysPred)
 }
 
 // pgToolInputCandidateBranch: candidate rows for regex from tool_input.

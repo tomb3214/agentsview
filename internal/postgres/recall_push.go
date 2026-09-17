@@ -134,13 +134,16 @@ func insertPGRecallPublication(
 			placeholders[24] += "::timestamptz"
 			placeholders[25] += "::timestamptz"
 			values = append(values, "("+strings.Join(placeholders, ",")+")")
+			// Model output and local archive text can contain NULs. Apply the
+			// same PostgreSQL text normalization as transcript publication,
+			// leaving entry identity, ownership and source records unchanged.
 			args = append(args,
 				entry.ID, machine, entry.Type, entry.Scope, entry.Status,
-				entry.ReviewState, entry.Title, entry.Body, entry.Trigger,
-				entry.Confidence, entry.Uncertainty, entry.Project, entry.CWD,
-				entry.GitBranch, entry.Agent, entry.SourceSessionID,
-				entry.SourceEpisodeID, entry.SourceRunID, entry.ExtractorMethod,
-				entry.Model, entry.Transferable, entry.ProvenanceOK,
+				entry.ReviewState, sanitizePG(entry.Title), sanitizePG(entry.Body), sanitizePG(entry.Trigger),
+				entry.Confidence, sanitizePG(entry.Uncertainty), sanitizePG(entry.Project), sanitizePG(entry.CWD),
+				sanitizePG(entry.GitBranch), sanitizePG(entry.Agent), entry.SourceSessionID,
+				entry.SourceEpisodeID, entry.SourceRunID, sanitizePG(entry.ExtractorMethod),
+				sanitizePG(entry.Model), entry.Transferable, entry.ProvenanceOK,
 				entry.SupersedesEntryID, entry.SupersededByEntryID,
 				entry.CreatedAt, entry.UpdatedAt,
 			)
@@ -187,7 +190,7 @@ func insertPGRecallPublication(
 				entry.ID, evidence.SessionID, evidence.MessageStartOrdinal,
 				evidence.MessageEndOrdinal, evidence.MessageStartSourceUUID,
 				evidence.MessageEndSourceUUID, evidence.ContentDigest,
-				evidence.ToolUseID, evidence.Snippet,
+				evidence.ToolUseID, sanitizePG(evidence.Snippet),
 			)
 			if len(values) == batchSize {
 				if err := flushEvidence(); err != nil {

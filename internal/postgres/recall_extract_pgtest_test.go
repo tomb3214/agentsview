@@ -63,6 +63,36 @@ func pgRecallResponse(w http.ResponseWriter) {
 	}}})
 }
 
+func TestPGRecallExtractionSanitizesModelText(t *testing.T) {
+	store, pg := recallExtractFixture(t, "agentsview_recall_text_test")
+	ctx := context.Background()
+	var calls atomic.Int32
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		_ = json.MarshalWrite(w, map[string]any{"choices": []any{map[string]any{
+			"finish_reason": "stop", "message": map[string]string{"role": "assistant",
+				"content": `{"entries":[{"type":"decision","title":"Storage\u0000 format","body":"Use the\u0000 established format é","entities":["format\u0000 choice"]}]}`},
+		}}})
+	}))
+	t.Cleanup(endpoint.Close)
+	manager := pgRecallManager(t, store, endpoint.URL)
+	result, err := manager.RunPass(ctx, extract.PassOptions{Full: true})
+	require.NoError(t, err)
+	assert.True(t, result.Activated)
+	assert.Equal(t, int32(2), calls.Load())
+	var published, evidence int
+	require.NoError(t, pg.QueryRow(`SELECT count(*) FROM recall_entries
+		WHERE title='Storage format' AND body=E'Use the established format é\nEntities: format choice'
+		AND machine='device' AND status='accepted' AND provenance_ok`).Scan(&published))
+	require.NoError(t, pg.QueryRow(`SELECT count(*) FROM recall_evidence
+		WHERE content_digest<>'' AND message_start_source_uuid<>''`).Scan(&evidence))
+	assert.Equal(t, 2, published)
+	assert.Equal(t, 2, evidence)
+	_, err = manager.RunPass(ctx, extract.PassOptions{Full: true})
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), calls.Load(), "published units must not be sent to the model again")
+}
+
 func TestPGRecallExtractionResumeActivationAndNoop(t *testing.T) {
 	store, pg := recallExtractFixture(t, "agentsview_recall_resume_test")
 	ctx := context.Background()

@@ -380,24 +380,29 @@ func TestPGSearchContentExcludeSystemReminderFalseFlag(t *testing.T) {
 	insertCSMessage(t, store, "cs-sys-reminder", 2, "user",
 		"<system-reminder>PGREMINDER context</system-reminder>\n\nPGREMINDER prompt",
 		"2026-05-01T10:00:02Z", false)
+	longBody := "\u2003\tThis session is being continued PGREMINDER " + strings.Repeat("context ", 4096)
+	insertCSMessage(t, store, "cs-sys-reminder", 3, "user",
+		longBody, "2026-05-01T10:00:03Z", false)
+	insertCSMessage(t, store, "cs-sys-reminder", 4, "assistant",
+		longBody, "2026-05-01T10:00:04Z", false)
 
 	ctx := context.Background()
 	for _, mode := range []string{"substring", "fts", "regex"} {
 		t.Run(mode, func(t *testing.T) {
 			f := db.ContentSearchFilter{
 				Pattern: "PGREMINDER", Mode: mode,
-				Sources: []string{"messages"}, Limit: 50,
+				Sources: []string{"messages"}, Machine: "test-machine", Limit: 50,
 			}
 			all, err := store.SearchContent(ctx, f)
 			require.NoError(t, err, "SearchContent %s", mode)
-			assert.ElementsMatch(t, []int{0, 1, 2}, messageOrdinals(all),
+			assert.ElementsMatch(t, []int{0, 1, 2, 3, 4}, messageOrdinals(all),
 				"without ExcludeSystem")
 
 			f.ExcludeSystem = true
 			filtered, err := store.SearchContent(ctx, f)
 			require.NoError(t, err, "SearchContent %s ExcludeSystem", mode)
-			assert.ElementsMatch(t, []int{0, 2}, messageOrdinals(filtered),
-				"reminder-only false-flag row must be excluded")
+			assert.ElementsMatch(t, []int{0, 2, 4}, messageOrdinals(filtered),
+				"system-prefixed user bodies are excluded; the same assistant body remains")
 		})
 	}
 }
