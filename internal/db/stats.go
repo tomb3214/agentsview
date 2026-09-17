@@ -21,7 +21,8 @@ type Stats struct {
 // and stats to exclude sub-agent, fork, and trashed sessions.
 const rootSessionFilter = `message_count > 0
 	AND relationship_type NOT IN ('subagent', 'fork')
-	AND deleted_at IS NULL`
+	AND deleted_at IS NULL
+    AND id NOT IN (SELECT session_id FROM local_session_cache_evictions)`
 
 func nonSourceBackedAgentPlaceholders() string {
 	agents := nonSourceBackedAgents()

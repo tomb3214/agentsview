@@ -560,6 +560,9 @@ func sessionFilterPredicates(
 	f SessionFilter, b *QueryBuilder, q func(string) string,
 ) ([]string, string) {
 	var preds []string
+	if b.dialect.name == "sqlite" {
+		preds = append(preds, "NOT EXISTS (SELECT 1 FROM local_session_cache_evictions e WHERE e.session_id="+outerSessionID(q)+")")
+	}
 	if f.Project != "" {
 		preds = append(preds, q("project")+" = "+b.Add(f.Project))
 	}

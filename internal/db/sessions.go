@@ -2737,7 +2737,8 @@ func (db *DB) GetSessionForIncremental(
 		   ON snap.session_id = s.id
 		 WHERE s.file_path = ?
 		   AND s.agent = ?
-		   AND s.deleted_at IS NULL`,
+		   AND s.deleted_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM local_session_cache_evictions e WHERE e.session_id=s.id)`,
 		path, agent,
 	).Scan(
 		&info.ID, &info.Project, &info.SourceProject,
@@ -5742,7 +5743,7 @@ func (db *DB) ListSessionsModifiedBetween(
 	query := "SELECT " + sessionFullCols + " FROM sessions"
 	var (
 		args  []any
-		where []string
+		where = []string{"NOT EXISTS (SELECT 1 FROM local_session_cache_evictions e WHERE e.session_id=sessions.id)"}
 	)
 	if since != "" {
 		sinceTime, err := time.Parse(time.RFC3339Nano, since)
@@ -5879,7 +5880,7 @@ func (db *DB) ListSessionsForMirrorWindow(
 	query := "SELECT " + sessionFullCols + " FROM sessions"
 	var (
 		args  []any
-		where []string
+		where = []string{"NOT EXISTS (SELECT 1 FROM local_session_cache_evictions e WHERE e.session_id=sessions.id)"}
 	)
 	if since != "" {
 		normalized, err := normalizeMirrorWindowBound(since)

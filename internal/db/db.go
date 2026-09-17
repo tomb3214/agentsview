@@ -1574,6 +1574,7 @@ func OpenReadOnly(path string) (*DB, error) {
 
 var readOnlyRequiredTables = []string{
 	"sessions",
+	"local_session_cache_evictions",
 	"messages",
 	"stats",
 	"usage_events",

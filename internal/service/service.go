@@ -16,6 +16,8 @@ import (
 // no full-text search index. Both transports surface it: the HTTP
 // backend maps a 501 response to it, and callers can errors.Is it
 // regardless of transport (the REST handler maps it back to HTTP 501).
+var ErrLocalContentEvicted = errors.New("local history was evicted; this session remains available in the central archive")
+
 var ErrSearchUnavailable = errors.New("search not available")
 
 // RecallQueryCapability is implemented by services whose backing store can

@@ -1341,3 +1341,15 @@ CREATE TABLE IF NOT EXISTS artifact_imported_sessions (
     ),
     PRIMARY KEY (origin, gid)
 );
+
+-- Opt-in local cache receipts are not logical deletion state.
+CREATE TABLE IF NOT EXISTS local_session_cache_evictions (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    file_hash TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    modified TEXT NOT NULL,
+    message_count INTEGER NOT NULL,
+    content_digest TEXT NOT NULL,
+    backup_id TEXT NOT NULL,
+    evicted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);

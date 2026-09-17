@@ -632,6 +632,12 @@ func writeOneSessionBatchTx(
 		return 0, err
 	}
 
+	if replaceMessages {
+		if _, err := queries.Exec(`DELETE FROM local_session_cache_evictions WHERE session_id=?
+            AND message_count <= (SELECT count(*) FROM messages WHERE session_id=?)`, write.Session.ID, write.Session.ID); err != nil {
+			return 0, err
+		}
+	}
 	return len(msgs), nil
 }
 

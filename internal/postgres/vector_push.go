@@ -612,6 +612,16 @@ func (s *Sync) applyVectorDeltas(
 	if err != nil {
 		return err
 	}
+	evicted, err := s.local.CacheEvictedSessionIDs(ctx)
+	if err != nil {
+		return err
+	}
+	if outOfScope == nil {
+		outOfScope = make(map[string]struct{})
+	}
+	for id := range evicted {
+		outOfScope[id] = struct{}{}
+	}
 
 	examined := 0
 	report := func() {

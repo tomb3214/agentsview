@@ -590,6 +590,14 @@ func reconcileRecallEvidenceForSessionTx(
 	sessionID string,
 	pending *recallEvidenceRevocationEvents,
 ) error {
+	var uncached bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM local_session_cache_evictions e
+        WHERE e.session_id=? AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.session_id=e.session_id))`, sessionID).Scan(&uncached); err != nil {
+		return err
+	}
+	if uncached {
+		return nil
+	}
 	groups, err := loadTrustedRecallEvidenceGroupsTx(ctx, tx, sessionID)
 	if err != nil {
 		return err
