@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json/v2"
 	"fmt"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -14,12 +15,18 @@ import (
 	kitvec "go.kenn.io/kit/vector"
 )
 
+func hasExplicitSessionFilters(f db.ContentSearchFilter) bool {
+	return f.Project != "" || f.ExcludeProject != "" || f.Machine != "" || f.Agent != "" ||
+		f.Date != "" || f.DateFrom != "" || f.DateTo != "" || f.ActiveSince != "" ||
+		f.GitBranch != "" || f.IncludeAutomated
+}
+
 // searchCandidatesPG deliberately does not fuse or rerank: the caller merges
 // these two bounded rankings with other authorized sources before one rerank.
 // It requires the separately commissioned native BM25 index. Ordinary local
 // and PostgreSQL search modes retain their existing response contract.
 func (s *Store) searchCandidatesPG(ctx context.Context, f db.ContentSearchFilter) (db.ContentSearchPage, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	v, ok := s.getVectorSearcher().(*vectorSearcher)
 	if !ok {
@@ -46,14 +53,12 @@ func (s *Store) searchCandidatesPG(ctx context.Context, f db.ContentSearchFilter
 	if err != nil {
 		return db.ContentSearchPage{}, err
 	}
-	tx, err := s.pg.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
-	if err != nil {
-		return db.ContentSearchPage{}, err
+
+	limit := 100
+	if f.Limit > 0 && f.Limit < 100 {
+		limit = f.Limit
 	}
-	defer func() { _ = tx.Rollback() }()
-	if err = tuneHNSWRecall(ctx, tx, 100); err != nil {
-		return db.ContentSearchPage{}, err
-	}
+
 	where, args := buildPGSessionBaseFilter(semanticPGSessionFilter(f))
 	scope := "d.ordinal >= 0 AND d.session_id IN (SELECT id FROM sessions WHERE " + where + ")"
 	if f.Scope == "top" {
@@ -64,35 +69,113 @@ func (s *Store) searchCandidatesPG(ctx context.Context, f db.ContentSearchFilter
 	}
 	fields := "d.doc_key,d.session_id,d.content_hash,d.ordinal,d.ordinal_end,d.content,s.machine,s.project,s.agent"
 	from := " FROM vector_documents d JOIN sessions s ON s.id=d.session_id "
-	param := fmt.Sprintf("$%d", len(args)+1)
-	// Select qualified keys before highlighting so full passage extraction is
-	// bounded by the ranked page. Both reads share this repeatable-read snapshot.
-	keyword := "SELECT d.doc_key FROM vector_documents d WHERE " + scope +
-		" AND EXISTS (SELECT 1 FROM " + v.chunkTable + " c WHERE c.doc_key=d.doc_key) AND d.content ||| " + param +
-		" ORDER BY pdb.score(d.doc_key) DESC,d.doc_key COLLATE \"C\" LIMIT 100"
-	keys, err := scanKeywordCandidateKeys(ctx, tx, keyword, append(append([]any{}, args...), f.Pattern))
-	if err != nil {
-		return db.ContentSearchPage{}, fmt.Errorf("BM25 candidate keys: %w", err)
-	}
-	lexical := []db.SearchCandidate{}
-	if len(keys) > 0 {
-		passages := "SELECT " + fields + ",to_json(pdb.snippet_positions(d.content,1))::text" + from +
-			"WHERE d.doc_key=ANY($2) AND d.content ||| $1 ORDER BY array_position($2,d.doc_key)"
-		lexical, err = scanCandidateRows(ctx, tx, passages, []any{f.Pattern, keys}, v.maxInputChars, true)
-		if err != nil {
-			return db.ContentSearchPage{}, fmt.Errorf("BM25 candidate passages: %w", err)
-		}
-	}
 
-	distance := "c.embedding OPERATOR(" + ext + ".<=>) " + param + "::" + ext + ".halfvec"
-	semantic := "SELECT " + fields + ",c.chunk_index" + from + " JOIN " + v.chunkTable + " c ON c.doc_key=d.doc_key WHERE " + scope +
-		" ORDER BY " + distance + ",d.doc_key COLLATE \"C\",c.chunk_index LIMIT 100"
-	vectors, err := scanCandidateRows(ctx, tx, semantic, append(append([]any{}, args...), literal), v.maxInputChars, false)
-	if err != nil {
-		return db.ContentSearchPage{}, fmt.Errorf("vector candidates: %w", err)
+	var lexical []db.SearchCandidate
+	var lexicalErr error
+	var vectors []db.SearchCandidate
+	var vectorErr error
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		tx, err := s.pg.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
+		if err != nil {
+			lexicalErr = err
+			return
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, "SET LOCAL max_parallel_workers_per_gather = 0"); err != nil {
+			lexicalErr = fmt.Errorf("disabling parallel workers: %w", err)
+			return
+		}
+		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+			lexicalErr = fmt.Errorf("disabling sequential scans: %w", err)
+			return
+		}
+
+		var keywordScope string
+		var keywordArgs []any
+		if hasExplicitSessionFilters(f) {
+			keywordScope = scope
+			keywordArgs = append(append([]any{}, args...), f.Pattern)
+		} else {
+			keywordScope = "d.ordinal >= 0"
+			if f.Scope == "top" {
+				keywordScope += " AND NOT d.subordinate"
+			}
+			if f.Scope == "subordinate" {
+				keywordScope += " AND d.subordinate"
+			}
+			keywordArgs = []any{f.Pattern}
+		}
+
+		keyword := fmt.Sprintf("SELECT d.doc_key FROM vector_documents d WHERE %s AND d.content ||| $%d ORDER BY pdb.score(d.doc_key) DESC,d.doc_key COLLATE \"C\" LIMIT %d", keywordScope, len(keywordArgs), limit)
+		keys, err := scanKeywordCandidateKeys(ctx, tx, keyword, keywordArgs)
+		if err != nil {
+			lexicalErr = fmt.Errorf("BM25 candidate keys: %w", err)
+			return
+		}
+		if len(keys) > 0 {
+			passagesWhere := "d.doc_key=ANY($2) AND EXISTS (SELECT 1 FROM " + v.chunkTable + " c WHERE c.doc_key=d.doc_key) AND d.content ||| $1"
+			if !hasExplicitSessionFilters(f) {
+				passagesWhere += " AND s.deleted_at IS NULL AND s.message_count > 0"
+			}
+			passages := "SELECT " + fields + ",to_json(pdb.snippet_positions(d.content,1))::text" + from +
+				"WHERE " + passagesWhere + " ORDER BY array_position($2,d.doc_key)"
+			lexical, lexicalErr = scanCandidateRows(ctx, tx, passages, []any{f.Pattern, keys}, v.maxInputChars, true)
+			if lexicalErr != nil {
+				lexicalErr = fmt.Errorf("BM25 candidate passages: %w", lexicalErr)
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		tx, err := s.pg.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
+		if err != nil {
+			vectorErr = err
+			return
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, "SET LOCAL max_parallel_workers_per_gather = 0"); err != nil {
+			vectorErr = fmt.Errorf("disabling parallel workers: %w", err)
+			return
+		}
+		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+			vectorErr = fmt.Errorf("disabling sequential scans: %w", err)
+			return
+		}
+		if err = tuneHNSWRecall(ctx, tx, limit); err != nil {
+			vectorErr = err
+			return
+		}
+
+		param := fmt.Sprintf("$%d", len(args)+1)
+		distance := "c.embedding OPERATOR(" + ext + ".<=>) " + param + "::" + ext + ".halfvec"
+		semantic := fmt.Sprintf("SELECT %s,c.chunk_index%s JOIN %s c ON c.doc_key=d.doc_key WHERE %s ORDER BY %s,d.doc_key COLLATE \"C\",c.chunk_index LIMIT %d", fields, from, v.chunkTable, scope, distance, limit)
+		vectors, vectorErr = scanCandidateRows(ctx, tx, semantic, append(append([]any{}, args...), literal), v.maxInputChars, false)
+		if vectorErr != nil {
+			vectorErr = fmt.Errorf("vector candidates: %w", vectorErr)
+			return
+		}
+	}()
+
+	wg.Wait()
+
+	if lexicalErr != nil {
+		return db.ContentSearchPage{}, lexicalErr
 	}
-	if err = tx.Commit(); err != nil {
-		return db.ContentSearchPage{}, err
+	if vectorErr != nil {
+		return db.ContentSearchPage{}, vectorErr
+	}
+	if lexical == nil {
+		lexical = []db.SearchCandidate{}
+	}
+	if vectors == nil {
+		vectors = []db.SearchCandidate{}
 	}
 	return db.ContentSearchPage{Matches: []db.ContentMatch{}, Rankings: [][]db.SearchCandidate{lexical, vectors}, Generation: v.genID, LexicalMethod: "bm25"}, nil
 }

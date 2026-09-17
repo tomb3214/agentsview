@@ -38,13 +38,14 @@ func (s *Store) searchContentSemanticPG(
 	}
 	surviving = db.ApplySubordinatePenalty(surviving)
 
-	meta, err := s.enrichSemanticHitsPG(ctx, surviving)
+	batchSize := min(len(surviving), max(f.Limit*2, 10))
+	meta, err := s.enrichSemanticHitsPG(ctx, surviving[:batchSize])
 	if err != nil {
 		return db.ContentSearchPage{}, err
 	}
 
 	out := make([]db.ContentMatch, 0, min(len(surviving), f.Limit))
-	for _, h := range surviving {
+	for _, h := range surviving[:batchSize] {
 		info, ok := meta[db.MessageRef{SessionID: h.SessionID, Ordinal: h.Ordinal}]
 		if !ok {
 			continue
@@ -68,6 +69,39 @@ func (s *Store) searchContentSemanticPG(
 		})
 		if len(out) >= f.Limit {
 			break
+		}
+	}
+
+	if len(out) < f.Limit && len(surviving) > batchSize {
+		remainderMeta, err := s.enrichSemanticHitsPG(ctx, surviving[batchSize:])
+		if err != nil {
+			return db.ContentSearchPage{}, err
+		}
+		for _, h := range surviving[batchSize:] {
+			info, ok := remainderMeta[db.MessageRef{SessionID: h.SessionID, Ordinal: h.Ordinal}]
+			if !ok {
+				continue
+			}
+			score := float64(h.Score)
+			out = append(out, db.ContentMatch{
+				SessionID:       h.SessionID,
+				Project:         info.project,
+				Agent:           info.agent,
+				Location:        "message",
+				Role:            info.role,
+				Ordinal:         h.Ordinal,
+				OrdinalRange:    [2]int{h.OrdinalStart, h.OrdinalEnd},
+				Subordinate:     h.Subordinate,
+				Relationship:    info.relationshipType,
+				ParentSessionID: info.parentSessionID,
+				Sidechain:       info.isSidechain,
+				Timestamp:       info.timestamp,
+				Snippet:         f.SemanticSnippet(info.content, h.Snippet),
+				Score:           &score,
+			})
+			if len(out) >= f.Limit {
+				break
+			}
 		}
 	}
 	return db.ContentSearchPage{Matches: out}, nil
