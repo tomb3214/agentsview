@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -62,6 +63,8 @@ func testCacheTrimCompleteBudgetLoop(t *testing.T, external bool) {
 	pushed, err := push.Push(ctx, false, nil)
 	require.NoError(t, err)
 	require.Zero(t, pushed.Errors)
+	_, err = postgres.RefreshCacheCoverage(ctx, pg, time.Minute)
+	require.NoError(t, err)
 	proof, err := postgres.ReadCacheCoverage(ctx, pg, "", nil)
 	require.NoError(t, err)
 	centralBefore := *proof

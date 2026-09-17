@@ -33,7 +33,7 @@ func newCacheCommand() *cobra.Command {
 			return err
 		}
 		defer pg.Close()
-		c, err := postgres.ReadCacheCoverage(cmd.Context(), pg, snapshot, nil)
+		c, err := postgres.ReadStoredCacheCoverage(cmd.Context(), pg, snapshot, nil)
 		if err != nil {
 			return err
 		}
@@ -45,6 +45,28 @@ func newCacheCommand() *cobra.Command {
 		return nil
 	}}
 	coverage.Flags().StringVar(&snapshot, "snapshot", "", "Exported snapshot also supplied to pg_dump")
+	var refreshBudget time.Duration
+	refresh := &cobra.Command{Use: "refresh-coverage", Short: "Checkpoint changed PostgreSQL content checks (backup administrator only)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		cfg, err := config.LoadMinimal()
+		if err != nil {
+			return err
+		}
+		pg, err := cachePostgres(cfg)
+		if err != nil {
+			return err
+		}
+		defer pg.Close()
+		result, err := postgres.RefreshCacheCoverage(cmd.Context(), pg, refreshBudget)
+		if result != nil {
+			out, encErr := json.Marshal(result)
+			if encErr != nil {
+				return encErr
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), string(out))
+		}
+		return err
+	}}
+	refresh.Flags().DurationVar(&refreshBudget, "max-duration", 5*time.Minute, "Time available for resumable content checks before taking the backup snapshot")
 	var budget int64
 	var proofPath string
 	trim := &cobra.Command{Use: "trim", Short: "Evict oldest local transcripts covered by central storage and a verified backup (daemon must be stopped)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -99,7 +121,7 @@ func newCacheCommand() *cobra.Command {
 	}}
 	trim.Flags().Int64Var(&budget, "max-bytes", 0, "Maximum local data directory bytes; protected data may exceed this")
 	trim.Flags().StringVar(&proofPath, "verified-backup", "", "Coverage from the exact read-back-verified encrypted backup")
-	cmd.AddCommand(coverage, trim)
+	cmd.AddCommand(coverage, refresh, trim)
 	return cmd
 }
 
@@ -329,7 +351,7 @@ func trimLocalCache(ctx context.Context, cfg config.Config, budget int64, proof 
 				ids = append(ids, s.ID)
 			}
 		}
-		current, err := postgres.ReadCacheCoverage(ctx, pg, "", ids)
+		current, err := postgres.ReadStoredCacheCoverage(ctx, pg, "", ids)
 		if err != nil {
 			return result, err
 		}

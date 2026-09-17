@@ -59,6 +59,14 @@ func ReadCacheCoverage(ctx context.Context, pg *sql.DB, snapshot string, selecti
 			return nil, err
 		}
 	}
+	coverage, err := readCacheCoverageTx(ctx, tx, selection)
+	if err != nil {
+		return nil, err
+	}
+	return coverage, tx.Commit()
+}
+
+func readCacheCoverageTx(ctx context.Context, tx *sql.Tx, selection []string) (*CacheCoverage, error) {
 	coverage := &CacheCoverage{Format: CacheCoverageFormat, CapturedAt: time.Now().UTC().Format(time.RFC3339), Sessions: map[string]CacheCopy{}}
 	query := `SELECT id, coalesce(source_archive_id,''),machine,coalesce(transcript_revision,''),message_count
         FROM sessions WHERE deleted_at IS NULL AND source_deleted_at IS NULL AND NOT is_truncated AND message_count>0`
@@ -106,7 +114,7 @@ func ReadCacheCoverage(ctx context.Context, pg *sql.DB, snapshot string, selecti
 			coverage.Sessions[id] = c
 		}
 	}
-	return coverage, tx.Commit()
+	return coverage, nil
 }
 
 // VerifyCachedSession reuses the publication path's complete normalized
