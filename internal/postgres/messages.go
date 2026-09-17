@@ -369,13 +369,11 @@ func (s *Store) Search(
 	// preventing pagination instability when sort keys are equal.
 	// NULLS LAST ensures sessions with NULL timestamps sort after
 	// sessions with real timestamps under DESC ordering.
-	// match_priority: 1 = message content match, 2 = name-only match.
-	// This ensures content matches always rank above name-only fallbacks
-	// regardless of match_pos (name-only rows have match_pos=0 which would
-	// otherwise sort them before content matches under match_pos ASC alone).
-	// match_priority: 1 = message content match, 2 = name-only match.
-	// Only applied in relevance mode so content matches rank above name-only
-	// fallbacks. Recency mode orders purely by time so the newest session
+	// match_priority: 1 = name/title match, 2 = message content match.
+	// This ensures title matches always rank above message content matches
+	// regardless of match_pos.
+	// Only applied in relevance mode so title matches rank above message content
+	// matches. Recency mode orders purely by time so the newest session
 	// wins regardless of match type.
 	outerOrderBy := "match_priority ASC, match_pos ASC, session_ended_at DESC NULLS LAST, session_id ASC"
 	if f.Sort == "recency" {
@@ -387,6 +385,93 @@ func (s *Store) Search(
 		"session_ended_at", "page.session_ended_at",
 		"session_id", "page.session_id",
 	).Replace(outerOrderBy)
+
+	// Two-tier lookup: for relevance searches (default), check session titles first.
+	// Title/session-name queries against sessions complete in tens of milliseconds (<60ms),
+	// whereas full message-content scans across multi-gigabyte message history take several
+	// seconds. If title matches exist, return them immediately without scanning messages.
+	if f.Sort != "recency" {
+		nameArgs := []any{escapeLike(plainTerm)}
+		nameProjClause := ""
+		if f.Project != "" {
+			nameProjClause = "AND s.project = $2"
+			nameArgs = append(nameArgs, f.Project)
+		}
+		nameLimitParam := fmt.Sprintf("$%d", len(nameArgs)+1)
+		nameOffsetParam := fmt.Sprintf("$%d", len(nameArgs)+2)
+		nameArgs = append(nameArgs, f.Limit+1, f.Cursor)
+
+		nameQuery := fmt.Sprintf(`
+			SELECT
+				s.id AS session_id,
+				s.project,
+				s.agent,
+				COALESCE(s.display_name, s.session_name, s.first_message, '') AS name,
+				COALESCE(s.ended_at, s.started_at) AS session_ended_at,
+				-1 AS ordinal,
+				CASE
+					WHEN COALESCE(s.display_name, s.session_name) ILIKE '%%%%' || $1 || '%%%%' ESCAPE E'\\'
+						THEN COALESCE(s.display_name, s.session_name, '')
+					WHEN s.first_message ILIKE '%%%%' || $1 || '%%%%' ESCAPE E'\\'
+						THEN COALESCE(s.first_message, '')
+					ELSE COALESCE(s.display_name, s.session_name, s.first_message, '')
+				END AS snippet,
+				1.0 AS rank,
+				0 AS match_pos
+			FROM sessions s
+			WHERE (COALESCE(s.display_name, s.session_name) ILIKE '%%%%' || $1 || '%%%%' ESCAPE E'\\'
+				OR s.first_message ILIKE '%%%%' || $1 || '%%%%' ESCAPE E'\\')
+				AND s.deleted_at IS NULL
+				AND EXISTS (
+					SELECT 1 FROM messages mx
+					WHERE mx.session_id = s.id
+					  AND mx.is_system = FALSE
+					  AND ` + db.PostgresSystemPrefixSQL("mx.content", "mx.role") + `
+				)
+				%s
+			ORDER BY session_ended_at DESC NULLS LAST, session_id ASC
+			LIMIT %s OFFSET %s`,
+			nameProjClause, nameLimitParam, nameOffsetParam,
+		)
+
+		nameRows, err := s.pg.QueryContext(ctx, nameQuery, nameArgs...)
+		if err != nil {
+			return db.SearchPage{}, fmt.Errorf("searching session titles: %w", err)
+		}
+
+		nameResults := []db.SearchResult{}
+		for nameRows.Next() {
+			var r db.SearchResult
+			var endedAt *time.Time
+			var matchPos int
+			if err := nameRows.Scan(
+				&r.SessionID, &r.Project, &r.Agent, &r.Name,
+				&endedAt, &r.Ordinal,
+				&r.Snippet, &r.Rank, &matchPos,
+			); err != nil {
+				nameRows.Close()
+				return db.SearchPage{}, fmt.Errorf("scanning session title result: %w", err)
+			}
+			if endedAt != nil {
+				r.SessionEndedAt = FormatISO8601(*endedAt)
+			}
+			nameResults = append(nameResults, r)
+		}
+		if err := nameRows.Err(); err != nil {
+			nameRows.Close()
+			return db.SearchPage{}, err
+		}
+		nameRows.Close()
+
+		if len(nameResults) > 0 {
+			page := db.SearchPage{Results: nameResults}
+			if len(nameResults) > f.Limit {
+				page.Results = nameResults[:f.Limit]
+				page.NextCursor = f.Cursor + f.Limit
+			}
+			return page, nil
+		}
+	}
 
 	// $1 = escaped ILIKE pattern for the name branch (full plain term)
 	// $2 = raw first term (for POSITION — case folded in expression)
@@ -418,34 +503,7 @@ func (s *Store) Search(
 	// recomputed for each prefix test. Materialize ranking metadata, not the
 	// large normalized bodies; fetch snippet text only for the selected page.
 	query := fmt.Sprintf(`
-		WITH candidates AS MATERIALIZED (
-			SELECT
-				m.session_id,
-				s.project,
-				s.agent,
-				COALESCE(s.display_name, s.session_name, s.first_message, '') AS name,
-				COALESCE(s.ended_at, s.started_at) AS session_ended_at,
-				m.ordinal,
-				POSITION(LOWER($2) IN text.folded_content) AS match_pos
-			FROM messages m
-			JOIN sessions s ON m.session_id = s.id
-			CROSS JOIN LATERAL (
-				SELECT `+db.SystemPrefixTrimSQL("m.content")+` AS trimmed_content,
-					LOWER(m.content) AS folded_content
-				OFFSET 0
-			) text
-			WHERE %s
-				AND s.deleted_at IS NULL
-				AND m.is_system = FALSE
-				AND `+db.PostgresSystemPrefixSQLFromTrimmed("text.trimmed_content", "m.role")+`
-				%s
-		),
-		msg_matches AS (
-			SELECT DISTINCT ON (session_id) candidates.*, NULL::text AS snippet
-			FROM candidates
-			ORDER BY session_id, match_pos ASC, ordinal ASC
-		),
-		name_matches AS (
+		WITH name_matches AS MATERIALIZED (
 			SELECT
 				s.id AS session_id,
 				s.project,
@@ -469,46 +527,74 @@ func (s *Store) Search(
 					SELECT 1 FROM messages mx
 					WHERE mx.session_id = s.id
 					  AND mx.is_system = FALSE
-					  AND `+db.PostgresSystemPrefixSQL("mx.content", "mx.role")+`
+					  AND ` + db.PostgresSystemPrefixSQL("mx.content", "mx.role") + `
 				)
-				AND s.id NOT IN (SELECT session_id FROM msg_matches)
 				%s
 		),
+		candidates AS MATERIALIZED (
+			SELECT
+				m.session_id,
+				s.project,
+				s.agent,
+				COALESCE(s.display_name, s.session_name, s.first_message, '') AS name,
+				COALESCE(s.ended_at, s.started_at) AS session_ended_at,
+				m.ordinal,
+				POSITION(LOWER($2) IN text.folded_content) AS match_pos
+			FROM messages m
+			JOIN sessions s ON m.session_id = s.id
+			CROSS JOIN LATERAL (
+				SELECT ` + db.SystemPrefixTrimSQL("m.content") + ` AS trimmed_content,
+					LOWER(m.content) AS folded_content
+				OFFSET 0
+			) text
+			WHERE %s
+				AND s.deleted_at IS NULL
+				AND m.is_system = FALSE
+				AND ` + db.PostgresSystemPrefixSQLFromTrimmed("text.trimmed_content", "m.role") + `
+				AND s.id NOT IN (SELECT session_id FROM name_matches)
+				%s
+		),
+		msg_matches AS (
+			SELECT DISTINCT ON (session_id) candidates.*, NULL::text AS snippet
+			FROM candidates
+			ORDER BY session_id, match_pos ASC, ordinal ASC
+		),
 		-- rank is a constant 1.0 because PostgreSQL ILIKE has no
-	-- relevance scoring engine (unlike SQLite FTS5). Ordering
-	-- uses match_pos and session_ended_at instead.
-	selected_page AS MATERIALIZED (
-	SELECT session_id, project, agent, name,
-			session_ended_at, ordinal,
-			snippet, 1.0 AS rank, match_pos, match_priority
-		FROM (
-			SELECT *, 1 AS match_priority FROM msg_matches
-			UNION ALL
-			SELECT *, 2 AS match_priority FROM name_matches
-		) combined
-		ORDER BY %s
-		LIMIT $%d OFFSET $%d
-	)
-	SELECT page.session_id, page.project, page.agent, page.name,
-		page.session_ended_at, page.ordinal,
-		CASE WHEN page.ordinal < 0 THEN page.snippet
-			WHEN page.match_pos > 100
-				THEN '...' || SUBSTRING(m.content
-					FROM GREATEST(1, page.match_pos - 50) FOR 200) || '...'
-			ELSE SUBSTRING(m.content FROM 1 FOR 200)
-				|| CASE WHEN LENGTH(m.content) > 200 THEN '...' ELSE '' END
-		END AS snippet,
-		page.rank, page.match_pos
-	FROM selected_page page
-	LEFT JOIN messages m ON m.session_id = page.session_id AND m.ordinal = page.ordinal
-	ORDER BY %s`,
+		-- relevance scoring engine (unlike SQLite FTS5). Ordering
+		-- uses match_pos and session_ended_at instead.
+		selected_page AS MATERIALIZED (
+		SELECT session_id, project, agent, name,
+				session_ended_at, ordinal,
+				snippet, 1.0 AS rank, match_pos, match_priority
+			FROM (
+				SELECT *, 1 AS match_priority FROM name_matches
+				UNION ALL
+				SELECT *, 2 AS match_priority FROM msg_matches
+			) combined
+			ORDER BY %s
+			LIMIT $%d OFFSET $%d
+		)
+		SELECT page.session_id, page.project, page.agent, page.name,
+			page.session_ended_at, page.ordinal,
+			CASE WHEN page.ordinal < 0 THEN page.snippet
+				WHEN page.match_pos > 100
+					THEN '...' || SUBSTRING(m.content
+						FROM GREATEST(1, page.match_pos - 50) FOR 200) || '...'
+				ELSE SUBSTRING(m.content FROM 1 FOR 200)
+					|| CASE WHEN LENGTH(m.content) > 200 THEN '...' ELSE '' END
+			END AS snippet,
+			page.rank, page.match_pos
+		FROM selected_page page
+		LEFT JOIN messages m ON m.session_id = page.session_id AND m.ordinal = page.ordinal
+		ORDER BY %s`,
+		nameProjectClause,
 		msgTermPredicate,
 		msgProjectClause,
-		nameProjectClause,
 		outerOrderBy,
 		argIdx, argIdx+1,
 		pageOrderBy,
 	)
+
 	args = append(args, f.Limit+1, f.Cursor)
 
 	rows, err := s.pg.QueryContext(ctx, query, args...)

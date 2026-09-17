@@ -108,15 +108,13 @@ func PostgresQueryDialect() QueryDialect {
 		trueLiteral:      "TRUE",
 		falseLiteral:     "FALSE",
 		dateStartExpr: func(q func(string) string) string {
-			return "COALESCE(" + q("started_at") + ", " +
+			return "COALESCE(LEAST(" + q("started_at") + ", " +
+				q("created_at") + "), " + q("started_at") + ", " +
 				q("created_at") + ")"
 		},
 		dateEndExpr: func(q func(string) string) string {
-			return "COALESCE(" + q("ended_at") +
-				", (SELECT MAX(m.timestamp) FROM messages m" +
-				" WHERE m.session_id = " + outerSessionID(q) +
-				" AND m.timestamp IS NOT NULL), " + q("started_at") +
-				", " + q("created_at") + ")"
+			return "COALESCE(" + q("ended_at") + ", " +
+				q("started_at") + ", " + q("created_at") + ")"
 		},
 		dateParam: func(ph string) string { return ph + "::timestamptz" },
 		activityParam: func(ph string) string {

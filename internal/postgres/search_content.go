@@ -64,7 +64,7 @@ func (s *Store) SearchContent(
 	}
 
 	if len(f.Sources) == 0 {
-		f.Sources = []string{"messages", "tool_input", "tool_result"}
+		f.Sources = []string{"messages", "tool_input"}
 	}
 	for _, src := range f.Sources {
 		if src != "messages" && src != "tool_input" && src != "tool_result" {
@@ -133,12 +133,22 @@ func (s *Store) searchContentSubstringPG(
 		return db.ContentSearchPage{}, nil
 	}
 
+	branchLimitP := pb.add(f.Limit + 1 + f.Cursor)
 	limitP := pb.add(f.Limit + 1)
 	offsetP := pb.add(f.Cursor)
+
+	wrappedBranches := make([]string, len(branches))
+	for i, b := range branches {
+		wrappedBranches[i] = fmt.Sprintf(
+			"(%s ORDER BY sort_ts DESC NULLS LAST, session_id ASC, ordinal ASC, src ASC, row_id ASC LIMIT %s)",
+			b, branchLimitP,
+		)
+	}
+
 	query := "WITH scoped AS (SELECT id, project, agent, ended_at, started_at, created_at FROM sessions WHERE " + scopeWhere + ") " +
 		"SELECT session_id, project, agent, location, role, tool_name, " +
 		"ordinal, ts, snippet FROM (" +
-		strings.Join(branches, " UNION ALL ") +
+		strings.Join(wrappedBranches, " UNION ALL ") +
 		") sub ORDER BY sort_ts DESC NULLS LAST, session_id ASC, ordinal ASC, src ASC, row_id ASC " +
 		"LIMIT " + limitP + " OFFSET " + offsetP
 
