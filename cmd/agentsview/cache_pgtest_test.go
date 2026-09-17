@@ -38,6 +38,10 @@ func testCacheTrimCompleteBudgetLoop(t *testing.T, external bool) {
 	defer pg.ExecContext(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE")
 	cfg := config.Config{DataDir: t.TempDir(), PG: config.PGConfig{Schema: schema, AllowInsecure: true}}
 	cfg.DBPath = filepath.Join(cfg.DataDir, "sessions.db")
+	backupDir := filepath.Join(cfg.DataDir, "backups")
+	require.NoError(t, os.Mkdir(backupDir, 0700))
+	backupFile := filepath.Join(backupDir, "recovery.dump")
+	require.NoError(t, os.WriteFile(backupFile, []byte("recovery copy outside the cache budget"), 0600))
 	if external {
 		require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "sessions.db"), cfg.DBPath))
 	}
@@ -91,6 +95,9 @@ func testCacheTrimCompleteBudgetLoop(t *testing.T, external bool) {
 	require.NoError(t, err)
 	assert.Zero(t, again.Evicted)
 	assert.True(t, again.WithinBudget)
+	recovery, err := os.ReadFile(backupFile)
+	require.NoError(t, err)
+	assert.Equal(t, "recovery copy outside the cache budget", string(recovery))
 	after, err := postgres.ReadCacheCoverage(ctx, pg, "", nil)
 	require.NoError(t, err)
 	assert.Equal(t, centralBefore.Sessions, after.Sessions)

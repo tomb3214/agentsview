@@ -43,6 +43,18 @@ func TestCacheRecencyAndFreshBackup(t *testing.T) {
 	assert.Empty(t, files)
 }
 
+func TestCacheBudgetExcludesRecoveryCopiesOnSameVolume(t *testing.T) {
+	cfg := config.Config{DataDir: t.TempDir()}
+	cfg.DBPath = filepath.Join(cfg.DataDir, "sessions.db")
+	require.NoError(t, os.Mkdir(filepath.Join(cfg.DataDir, "backups"), 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(cfg.DataDir, "backups", "recovery.dump"), make([]byte, 1000), 0600))
+	require.NoError(t, os.WriteFile(cfg.DBPath, make([]byte, 200), 0600))
+	total, reserved, err := cacheStorageBytes(cfg)
+	require.NoError(t, err)
+	assert.Equal(t, int64(200), total)
+	assert.Zero(t, reserved)
+}
+
 func TestCacheAuxiliaryOverflowRetainsTranscripts(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.Config{DataDir: t.TempDir()}

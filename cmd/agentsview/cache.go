@@ -164,6 +164,11 @@ func cacheStorageBytes(cfg config.Config) (total, reserved int64, err error) {
 		if e != nil {
 			return e
 		}
+		// Recovery archives are outside the local-history budget, including
+		// deployments whose backup directory lives on the same volume.
+		if entry.IsDir() && path == filepath.Join(root, "backups") {
+			return fs.SkipDir
+		}
 		if entry.Type().IsRegular() {
 			_, e = add(path)
 		}
