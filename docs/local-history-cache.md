@@ -33,8 +33,15 @@ change the retention of source files or backups.
 
 ## Backup integration
 
-1. Export a PostgreSQL repeatable-read snapshot and keep its transaction open.
-2. Capture `agentsview cache coverage --snapshot SNAPSHOT` and `pg_dump` using
+1. As the backup administrator, run
+   `agentsview cache refresh-coverage --max-duration 5m` before opening a dump
+   snapshot. It installs PostgreSQL statement triggers and saves complete
+   normalized content checks in `cache_coverage_state_v1`. Grant device accounts
+   SELECT on this table, never INSERT, UPDATE, DELETE or TRUNCATE. Source writes
+   invalidate checks in their own transaction; device accounts cannot forge
+   them. This opt-in command requires ownership of the source tables.
+2. Export a PostgreSQL repeatable-read snapshot and keep its transaction open.
+   Capture `agentsview cache coverage --snapshot SNAPSHOT` and `pg_dump` using
    that same snapshot. The coverage contains identifiers and normalized content
    fingerprints, not transcript text. A protected `AGENTSVIEW_CACHE_PG_URL`
    environment variable can select the backup connection.
@@ -44,6 +51,16 @@ change the retention of source files or backups.
    Reserve writes to this key for the backup authority; device ingest accounts
    must only read it. Alternatively an operator can supply the verified
    coverage through `--verified-backup FILE`.
+
+Refresh processes only unchecked or changed sessions, oldest first, and commits
+bounded batches. An interruption loses at most the current batch; the next run
+reuses completed checks. A timeout is a successful partial refresh, reported in
+its JSON result. The snapshot captures only checks still valid in that snapshot,
+so a partial refresh can support cleanup without certifying unchecked history.
+Initial archive coverage can span runs; recurring work scales with changed
+content. Capture and trim read saved checks without transferring central
+transcript bodies. Missing or disabled invalidation triggers prevent use of the
+store; administrator repair clears its checks before rebuilding them.
 
 Trim requires coverage captured within 72 hours and compares each candidate
 against both that backup and current PostgreSQL content. Ordinary daily backup
