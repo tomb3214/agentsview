@@ -87,7 +87,7 @@ func (db *DB) CountPendingArtifactExports(ctx context.Context) (int, error) {
 	var count int
 	if err := db.getReader().QueryRowContext(ctx, `
 		SELECT count(*) FROM artifact_export_queue
-		WHERE pending = 1`).Scan(&count); err != nil {
+		WHERE pending = 1 AND session_id NOT IN (SELECT session_id FROM local_session_cache_evictions)`).Scan(&count); err != nil {
 		return 0, fmt.Errorf("counting artifact export queue: %w", err)
 	}
 	return count, nil
@@ -104,7 +104,7 @@ func (db *DB) PendingArtifactExports(
 	rows, err := db.getReader().QueryContext(ctx, `
 		SELECT session_id, enqueued_at, generation
 		FROM artifact_export_queue
-		WHERE pending = 1
+		WHERE pending = 1 AND session_id NOT IN (SELECT session_id FROM local_session_cache_evictions)
 		ORDER BY enqueued_at, session_id
 		LIMIT ?`, limit)
 	if err != nil {
@@ -158,7 +158,7 @@ func (db *DB) ArtifactExportClaims(
 	rows, err := db.getReader().QueryContext(ctx, `
 		SELECT session_id, enqueued_at, generation
 		FROM artifact_export_queue
-		WHERE pending = 1 AND session_id IN (`+placeholders+`)
+		WHERE pending = 1 AND session_id NOT IN (SELECT session_id FROM local_session_cache_evictions) AND session_id IN (`+placeholders+`)
 		ORDER BY session_id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("reading exact artifact export claims: %w", err)

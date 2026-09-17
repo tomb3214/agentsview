@@ -2904,6 +2904,14 @@ func (e *Engine) resyncBuildLocked(
 		return
 	}
 
+	if err = newDB.CopyCacheEvictionsFrom(origPath); err != nil {
+		newDB.Close()
+		removeTempDB(tempPath)
+		restoreSkipCache()
+		stats = SyncStats{Aborted: true, Warnings: []string{"resync failed: preserve cache receipts: " + err.Error()}}
+		return stats, err
+	}
+
 	// 2b. Copy excluded session IDs from the old DB so that
 	// UpsertSession skips permanently deleted sessions during
 	// the sync. This must happen before syncAllLocked.
@@ -3802,6 +3810,7 @@ func countRootSessionsForAgent(
 		  AND message_count > 0
 		  AND relationship_type NOT IN ('subagent', 'fork')
 		  AND deleted_at IS NULL
+          AND id NOT IN (SELECT session_id FROM local_session_cache_evictions)
 	`+machinePredicate, args...).Scan(&count)
 	if err != nil {
 		log.Printf("count root %s sessions: %v", agent, err)
@@ -3830,6 +3839,7 @@ func countIcodemateContainerRootSessions(
 		  AND message_count > 0
 		  AND relationship_type NOT IN ('subagent', 'fork')
 		  AND deleted_at IS NULL
+          AND id NOT IN (SELECT session_id FROM local_session_cache_evictions)
 	`+machinePredicate, args...).Scan(&count)
 	if err != nil {
 		log.Printf("count root ICodeMate container sessions: %v", err)
@@ -10667,6 +10677,17 @@ func (e *Engine) processProviderFile(
 		}
 		return processResult{err: err}, true
 	}
+	cachePath := file.Path
+	if e.pathRewriter != nil {
+		cachePath = e.pathRewriter(cachePath)
+	}
+	cacheFresh, cacheErr := e.db.CacheSourceUnchanged(ctx, string(file.Agent), cachePath, fingerprint.Hash)
+	if cacheErr != nil {
+		return processResult{err: cacheErr}, true
+	}
+	if cacheFresh {
+		return processResult{skip: true, mtime: fingerprint.MTimeNS}, true
+	}
 	cacheKey := providerProcessCacheKey(
 		file, source, fingerprint, providerSemantics,
 	)
@@ -15433,6 +15454,11 @@ func (e *Engine) writeBatchWithOutcomeContext(
 		replaceMessages := shouldReplaceFullParseMessages(
 			pw, forceReplace, stale, revivingSourceMissing,
 		)
+		cached, cacheErr := e.db.CacheEviction(ctx, s.ID)
+		if cacheErr != nil {
+			return outcome
+		}
+		replaceMessages = replaceMessages || cached != nil
 
 		var update db.SessionSignalUpdate
 		var findings []db.SecretFinding
@@ -15514,6 +15540,10 @@ func (e *Engine) writeBatchWithOutcomeContext(
 			return outcome
 		}
 
+		if err := e.db.CompleteCacheRestore(ctx, s.ID); err != nil {
+			outcome.failedSessions++
+			continue
+		}
 		if !replaceMessages && !e.disableSignalRecompute {
 			if ctx.Err() != nil {
 				return outcome
@@ -15613,6 +15643,14 @@ func (e *Engine) prepareSessionWriteContext(
 	}
 	if err := ctx.Err(); err != nil {
 		return db.Session{}, nil, sessionWritePreserved, err
+	}
+
+	cached, cacheErr := e.db.CacheEviction(ctx, s.ID)
+	if cacheErr != nil {
+		return db.Session{}, nil, sessionWritePreserved, cacheErr
+	}
+	if cached != nil && (cached.FileHash == derefString(s.FileHash) || len(msgs) < cached.MessageCount) {
+		return db.Session{}, nil, sessionWritePreserved, nil
 	}
 
 	if e.shouldPreserveOpenCodeFormatArchive(
@@ -16510,6 +16548,11 @@ func (e *Engine) writeBatchBulkWithOutcomeContext(
 		replaceMessages := shouldReplaceFullParseMessages(
 			pw, forceReplace, false, false,
 		)
+		cached, cacheErr := e.db.CacheEviction(ctx, s.ID)
+		if cacheErr != nil {
+			return outcome
+		}
+		replaceMessages = replaceMessages || cached != nil
 		var update db.SessionSignalUpdate
 		var findings []db.SecretFinding
 		if !e.disableSignalRecompute {
@@ -17401,6 +17444,9 @@ func (e *Engine) writeSessionFullWithResolver(
 		log.Printf(
 			"set data_version for %s: %v", s.ID, err,
 		)
+		return err
+	}
+	if err := e.db.CompleteCacheRestore(context.Background(), s.ID); err != nil {
 		return err
 	}
 	if err := e.db.ReviveSourceMissingSession(s.ID); err != nil {

@@ -110,6 +110,7 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(newSyncCommand())
 	root.AddCommand(newSyncWorkerCommand())
 	root.AddCommand(newPruneCommand())
+	root.AddCommand(newCacheCommand())
 	root.AddCommand(newUpdateCommand())
 	root.AddCommand(newTokenUseCommand())
 	root.AddCommand(newImportCommand())

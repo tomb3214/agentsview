@@ -1146,6 +1146,9 @@ func (b *httpBackend) getJSONWithClient(
 	if resp.StatusCode == http.StatusNotFound {
 		return errHTTPNotFound
 	}
+	if resp.StatusCode == http.StatusGone && strings.HasPrefix(path, "/api/v1/sessions/") {
+		return ErrLocalContentEvicted
+	}
 	if resp.StatusCode == http.StatusNotImplemented {
 		body, _ := io.ReadAll(resp.Body)
 		return &errNotImplementedBody{message: notImplementedMessage(body)}

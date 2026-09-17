@@ -287,6 +287,9 @@ func (s *Server) humaGetSession(
 	in *idPathInput,
 ) (*jsonOutput[*service.SessionDetail], error) {
 	detail, err := s.sessions.Get(ctx, in.ID)
+	if errors.Is(err, service.ErrLocalContentEvicted) {
+		return nil, apiError(http.StatusGone, err.Error())
+	}
 	if err != nil {
 		return nil, serverError(err)
 	}
@@ -335,6 +338,9 @@ func (s *Server) humaGetMessages(
 		filter.Roles = splitTrimmedNonEmpty(in.Roles)
 	}
 	list, err := s.sessions.Messages(ctx, in.ID, filter)
+	if errors.Is(err, service.ErrLocalContentEvicted) {
+		return nil, apiError(http.StatusGone, err.Error())
+	}
 	if err != nil {
 		if errors.Is(err, service.ErrAroundMutuallyExclusive) ||
 			errors.Is(err, service.ErrBeforeAfterRequireAround) {
@@ -365,6 +371,9 @@ func (s *Server) humaToolCalls(
 	in *idPathInput,
 ) (*jsonOutput[*service.ToolCallList], error) {
 	list, err := s.sessions.ToolCalls(ctx, in.ID)
+	if errors.Is(err, service.ErrLocalContentEvicted) {
+		return nil, apiError(http.StatusGone, err.Error())
+	}
 	if err != nil {
 		return nil, serverError(err)
 	}

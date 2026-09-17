@@ -55,9 +55,27 @@ func NewReadOnlyBackend(d db.Store) SessionService {
 
 func (b *directBackend) SupportsRecallQueries() bool { return b.local != nil }
 
+func (b *directBackend) requireLocalContent(ctx context.Context, id string) error {
+	if b.local == nil {
+		return nil
+	}
+	receipt, err := b.local.CacheEviction(ctx, id)
+	if err != nil {
+		return err
+	}
+	if receipt != nil {
+		return ErrLocalContentEvicted
+	}
+	return nil
+}
+
 func (b *directBackend) Get(
 	ctx context.Context, id string,
 ) (*SessionDetail, error) {
+	if err := b.requireLocalContent(ctx, id); err != nil {
+		return nil, err
+	}
+
 	s, err := b.db.GetSession(ctx, id)
 	if err != nil || s == nil {
 		return nil, err
@@ -245,6 +263,10 @@ const defaultAroundSpan = 5
 func (b *directBackend) Messages(
 	ctx context.Context, id string, f MessageFilter,
 ) (*MessageList, error) {
+	if err := b.requireLocalContent(ctx, id); err != nil {
+		return nil, err
+	}
+
 	if f.Around != nil && (f.From != nil || f.Direction != "") {
 		return nil, ErrAroundMutuallyExclusive
 	}
@@ -356,6 +378,10 @@ func clampAroundSpan(before, after int) (int, int) {
 func (b *directBackend) ToolCalls(
 	ctx context.Context, id string,
 ) (*ToolCallList, error) {
+	if err := b.requireLocalContent(ctx, id); err != nil {
+		return nil, err
+	}
+
 	msgs, err := b.db.GetAllMessages(ctx, id)
 	if err != nil {
 		return nil, err
