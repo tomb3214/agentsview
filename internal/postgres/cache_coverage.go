@@ -53,7 +53,7 @@ func ReadCacheCoverage(ctx context.Context, pg *sql.DB, snapshot string, selecti
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if snapshot != "" {
 		if _, err = tx.ExecContext(ctx, "SET TRANSACTION SNAPSHOT '"+snapshot+"'"); err != nil {
 			return nil, err

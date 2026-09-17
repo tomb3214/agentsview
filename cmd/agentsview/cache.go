@@ -104,6 +104,7 @@ func newCacheCommand() *cobra.Command {
 }
 
 func cachePostgres(cfg config.Config) (*sql.DB, error) {
+	applyClassifierConfig(cfg)
 	// Backup jobs can supply a dedicated read-only DSN through their protected
 	// environment. Credentials never appear in command arguments or output.
 	if url := os.Getenv("AGENTSVIEW_CACHE_PG_URL"); url != "" {

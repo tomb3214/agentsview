@@ -1,3 +1,8 @@
+---
+title: Optional local history budget
+description: Keep recent local history while preserving a complete central archive and verified recovery copies.
+---
+
 # Optional local history budget
 
 AgentsView keeps its complete SQLite archive by default. A managed deployment

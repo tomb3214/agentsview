@@ -82,7 +82,7 @@ func (d *DB) EvictCachedSession(ctx context.Context, e CacheEviction) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var matched int
 	err = tx.QueryRowContext(ctx, `SELECT count(*) FROM sessions s WHERE id=?
         AND file_hash=? AND transcript_revision=? AND coalesce(local_modified_at,'')=?
@@ -174,7 +174,7 @@ func (d *DB) CopyCacheEvictionsFrom(sourcePath string) error {
 	if _, err = conn.ExecContext(ctx, "ATTACH DATABASE ? AS old_db", sourcePath); err != nil {
 		return err
 	}
-	defer conn.ExecContext(ctx, "DETACH DATABASE old_db")
+	defer func() { _, _ = conn.ExecContext(ctx, "DETACH DATABASE old_db") }()
 	var exists int
 	if err = conn.QueryRowContext(ctx, `SELECT count(*) FROM old_db.sqlite_master WHERE name='local_session_cache_evictions'`).Scan(&exists); err != nil {
 		return err
@@ -186,7 +186,7 @@ func (d *DB) CopyCacheEvictionsFrom(sourcePath string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	cols := orphanSessionCols(ctx, tx)
 	if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO sessions ("+cols+") SELECT "+cols+` FROM old_db.sessions
         WHERE id IN(SELECT session_id FROM old_db.local_session_cache_evictions)`); err != nil {
