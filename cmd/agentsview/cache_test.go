@@ -48,11 +48,15 @@ func TestCacheBudgetExcludesRecoveryCopiesOnSameVolume(t *testing.T) {
 	cfg.DBPath = filepath.Join(cfg.DataDir, "sessions.db")
 	require.NoError(t, os.Mkdir(filepath.Join(cfg.DataDir, "backups"), 0700))
 	require.NoError(t, os.WriteFile(filepath.Join(cfg.DataDir, "backups", "recovery.dump"), make([]byte, 1000), 0600))
+	staging := filepath.Join(cfg.DataDir, ".agentsview-native-vault-metadata", "20260917T172845Z")
+	require.NoError(t, os.MkdirAll(staging, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(staging, "filtered-manifest.json"), make([]byte, 3000), 0600))
 	require.NoError(t, os.WriteFile(cfg.DBPath, make([]byte, 200), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(cfg.DataDir, "sync.log"), make([]byte, 50), 0600))
 	total, reserved, err := cacheStorageBytes(cfg)
 	require.NoError(t, err)
-	assert.Equal(t, int64(200), total)
-	assert.Zero(t, reserved)
+	assert.Equal(t, int64(250), total)
+	assert.Equal(t, int64(50), reserved)
 }
 
 func TestCacheAuxiliaryOverflowRetainsTranscripts(t *testing.T) {

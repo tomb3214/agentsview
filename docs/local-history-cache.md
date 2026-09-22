@@ -12,7 +12,9 @@ stopped. The command acquires the normal archive and vector writer locks.
 
 The budget counts regular files below the configured data directory, including
 SQLite, vectors, logs and migration backups, and the configured archive/vector databases when moved onto another volume.
-Other symlink targets and the recovery `backups/` directory are excluded.
+Other symlink targets, the recovery `backups/` directory and a managed
+native-vault job's transient `.agentsview-native-vault-metadata/` snapshot
+staging are excluded.
 Eligible sessions are removed oldest first by normalized last-activity time,
 with session ID breaking ties. Pinned, incomplete, unpublished or unverified
 sessions stay local even if this prevents meeting the budget. If auxiliary
