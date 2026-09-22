@@ -187,8 +187,11 @@ func cacheStorageBytes(cfg config.Config) (total, reserved int64, err error) {
 			return e
 		}
 		// Recovery archives are outside the local-history budget, including
-		// deployments whose backup directory lives on the same volume.
-		if entry.IsDir() && path == filepath.Join(root, "backups") {
+		// deployments whose backup directory lives on the same volume. A
+		// managed native-vault job's transient snapshot staging belongs to that
+		// separate backup process and is not local history.
+		if entry.IsDir() && (path == filepath.Join(root, "backups") ||
+			path == filepath.Join(root, ".agentsview-native-vault-metadata")) {
 			return fs.SkipDir
 		}
 		if entry.Type().IsRegular() {
