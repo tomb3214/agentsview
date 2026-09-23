@@ -12,11 +12,11 @@ import (
 func TestDirectSearchRetainsBusinessEvidenceWithoutReveal(t *testing.T) {
 	t.Parallel()
 	d := dbtest.OpenTestDB(t)
-	original := "campaign=Xa9Kd03Lm5Qp7Rt2Vw8Zb4Nc6"
+	original := "campaign=Xa9Kd03Lm5Qp7Rt2Vw8Zb4Nc6 token=trip-code secret=walking-route"
 	seedServiceSearchSession(t, d, "business-original", "proj", original)
 	be := service.NewDirectBackend(d, nil)
 	res, err := be.SearchContent(context.Background(), service.ContentSearchRequest{
-		Pattern: "campaign=", Mode: "substring", Limit: 5,
+		Pattern: "token=", Mode: "substring", Limit: 5,
 	})
 	require.NoError(t, err)
 	require.Len(t, res.Matches, 1)

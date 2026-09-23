@@ -204,6 +204,8 @@ func TestRedactPreservesOriginalBusinessValues(t *testing.T) {
 	for _, original := range []string{
 		"campaign=Xa9Kd03Lm5Qp7Rt2Vw8Zb4Nc6QrStUvWxYz0123",
 		"campaign=22790218752 email=alex@example.test phone=+61400000000 name=Alex diet=vegan",
+		"token=trip-code secret=walking-route signature=Alex",
+		"https://example.test/trip?token=trip-code&secret=walking-route#alex@example.test",
 		"https://example.test/trip?email=alex%40example.test&campaign=22790218752#diet=vegan",
 		"receipt_secret_missing access_token_required page_token=Xa9Kd03Lm5Qp7Rt2Vw8Zb4Nc6",
 		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dumm_Sig-Value12345",
