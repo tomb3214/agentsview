@@ -213,7 +213,7 @@ var redactionRules = func() []rule {
 	return append(out, rule{
 		name:       "credential-assignment",
 		prefilters: []string{"=", ":"},
-		re:         regexp.MustCompile(`(?i)\b(?:(?:[a-z0-9]+_)*(?:api[_-]?(?:key|token)|access[_-]?token|refresh[_-]?token|client[_-]?secret|signature[_-]?token|password|passwd)|authorization|token|secret)["']?\s*[=:]\s*["']?([^\s"';,&#]+)`),
+		re:         regexp.MustCompile(`(?i)\b(?:(?:[a-z0-9]+_)*(?:api[_-]?(?:key|token)|access[_-]?token|refresh[_-]?token|client[_-]?secret|signature[_-]?token|password|passwd)|authorization|token|secret)["']?\s*[=:]\s*["']?(?:(?:basic|bearer|token|digest)\s+)?([^\s"';,&#]+)`),
 		group:      1,
 		mask:       func(string) string { return "[redacted credential]" },
 	}, rule{

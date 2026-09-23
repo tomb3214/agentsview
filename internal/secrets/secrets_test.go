@@ -207,12 +207,13 @@ func TestRedactPreservesOriginalBusinessValues(t *testing.T) {
 		"https://example.test/trip?email=alex%40example.test&campaign=22790218752#diet=vegan",
 		"receipt_secret_missing access_token_required page_token=Xa9Kd03Lm5Qp7Rt2Vw8Zb4Nc6",
 		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dumm_Sig-Value12345",
+		"Basic setup and Token accounting retain their ordinary prose",
 	} {
 		assert.Equal(t, original, Redact(original))
 		assert.Equal(t, original, RedactWindow(original, 0, len(original)))
 	}
 	value := "opaque-credential-fixture"
-	for _, transport := range []string{"api_key=", "META_ACCESS_TOKEN=", "Authorization: Bearer ", "signature_token="} {
+	for _, transport := range []string{"api_key=", "META_ACCESS_TOKEN=", "Authorization: Bearer ", "Authorization: Basic ", `"Authorization": "Basic `, "Authorization: Token ", "signature_token="} {
 		assert.NotContains(t, Redact(transport+value), value)
 	}
 }
