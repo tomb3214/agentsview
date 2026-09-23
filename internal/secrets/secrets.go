@@ -172,12 +172,11 @@ func containedInLongerCandidate(m Match, raw []Match) bool {
 	return false
 }
 
-// Redact returns text with every secret-shaped span replaced by a masked
-// form. Overlapping spans (e.g. a high-entropy candidate covering a vendor
-// token) are merged so no full secret survives; a merged interval is
-// masked generically, a lone span uses its rule's mask.
+// Redact protects recognised vendor credentials and explicit credential
+// transports. Candidate shapes alone never remove original business values.
+// Overlapping credential spans are merged; a lone span uses its rule mask.
 func Redact(text string) string {
-	return redactSpans(text, scanRaw(text))
+	return redactSpans(text, scanRulesRaw(text, redactionRules))
 }
 
 // redactSpans masks the secret spans raw within text and returns the result.
@@ -244,7 +243,7 @@ func RedactWindow(full string, lo, hi int) string {
 	if lo >= hi {
 		return ""
 	}
-	raw := scanRaw(full)
+	raw := scanRulesRaw(full, redactionRules)
 	lo, hi = expandToCoverSecrets(raw, lo, hi)
 	// expandToCoverSecrets guarantees every span overlapping the window is now
 	// fully inside it; translate those spans to slice-relative offsets and mask

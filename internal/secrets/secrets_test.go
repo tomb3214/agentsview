@@ -85,7 +85,7 @@ func TestRedactWindowMasksStraddlingSecret(t *testing.T) {
 // the bare slice would fail to re-detect (the "scheme://user:" or "key=" context
 // is gone) and leak the secret.
 func TestRedactWindowMasksStraddlingGroupedSecret(t *testing.T) {
-	t.Run("high-entropy-assignment", func(t *testing.T) {
+	t.Run("credential-assignment", func(t *testing.T) {
 		val := "Xa9Kd03Lm5Qp7Rt2Vw8Zb4Nc6QrStUvWxYz0123"
 		full := "export api_key=" + val + " done"
 		vs := strings.Index(full, val)
@@ -126,7 +126,6 @@ func TestRedactNeverLeaksKnownSecrets(t *testing.T) {
 		"AIza7Qh3Wn8Dk4Rp9Vx2Mb6Tj0Qc5Lm1Yp8Bv4H",
 		"AIza7Qh3Wn8Dk4Rp9Vx2Mb6Tj0Qc5Lm1Yp8Bv4-",
 		"sk-ant-api03-Xa9Kd03Lm5Qp7Rt2Vw8Zb4",
-		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dumm_Sig-Value12345",
 	}
 	for _, sec := range secrets {
 		for _, tmpl := range []string{"%s", "prefix %s suffix", "a=%s\nb=2"} {
@@ -198,4 +197,22 @@ func TestScanJWTNotDuplicatedAsHighEntropy(t *testing.T) {
 		}
 	}
 	assert.True(t, foundJWT, "expected a jwt candidate; got %+v", got)
+}
+
+func TestRedactPreservesOriginalBusinessValues(t *testing.T) {
+	require.NotEmpty(t, Scan("campaign=Xa9Kd03Lm5Qp7Rt2Vw8Zb4Nc6QrStUvWxYz0123"), "baseline scanner must classify the business ID as a candidate")
+	for _, original := range []string{
+		"campaign=Xa9Kd03Lm5Qp7Rt2Vw8Zb4Nc6QrStUvWxYz0123",
+		"campaign=22790218752 email=alex@example.test phone=+61400000000 name=Alex diet=vegan",
+		"https://example.test/trip?email=alex%40example.test&campaign=22790218752#diet=vegan",
+		"receipt_secret_missing access_token_required page_token=Xa9Kd03Lm5Qp7Rt2Vw8Zb4Nc6",
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dumm_Sig-Value12345",
+	} {
+		assert.Equal(t, original, Redact(original))
+		assert.Equal(t, original, RedactWindow(original, 0, len(original)))
+	}
+	value := "opaque-credential-fixture"
+	for _, transport := range []string{"api_key=", "META_ACCESS_TOKEN=", "Authorization: Bearer ", "signature_token="} {
+		assert.NotContains(t, Redact(transport+value), value)
+	}
 }

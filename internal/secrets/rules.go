@@ -200,6 +200,31 @@ var rules = []rule{
 	},
 }
 
+// Redaction protects credential transports and recognised vendor credentials.
+// Candidate discovery can still flag unusual values without hiding business
+// identifiers from authorised search and context readers.
+var redactionRules = func() []rule {
+	var out []rule
+	for _, r := range rules {
+		if r.confidence == ConfidenceDefinite || r.name == "basic-auth-url" {
+			out = append(out, r)
+		}
+	}
+	return append(out, rule{
+		name:       "credential-assignment",
+		prefilters: []string{"=", ":"},
+		re:         regexp.MustCompile(`(?i)\b(?:(?:[a-z0-9]+_)*(?:api[_-]?(?:key|token)|access[_-]?token|refresh[_-]?token|client[_-]?secret|signature[_-]?token|password|passwd)|authorization|token|secret)["']?\s*[=:]\s*["']?([^\s"';,&#]+)`),
+		group:      1,
+		mask:       func(string) string { return "[redacted credential]" },
+	}, rule{
+		name:       "bearer-authorization",
+		prefilters: []string{"Bearer ", "bearer ", "BEARER "},
+		re:         regexp.MustCompile(`(?i)\bBearer\s+([^\s"';,]+)`),
+		group:      1,
+		mask:       func(string) string { return "[redacted credential]" },
+	})
+}()
+
 // definiteRules is the well-anchored vendor-format subset of rules, computed
 // once at load. ScanDefinite uses it for the fast inline-sync path.
 var definiteRules = filterByConfidence(rules, ConfidenceDefinite)
